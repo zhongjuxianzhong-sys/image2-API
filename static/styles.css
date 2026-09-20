@@ -146,7 +146,7 @@ button, select, input, textarea { font: inherit; color: inherit; }
   margin-bottom: 6px;
 }
 
-textarea, select, .stepper input {
+textarea, select, .stepper input, #customRatioInput {
   width: 100%;
   border: 1px solid var(--border);
   border-radius: var(--radius);
@@ -157,7 +157,7 @@ textarea, select, .stepper input {
 
 textarea { resize: vertical; min-height: 132px; }
 
-textarea:focus, select:focus, .stepper input:focus {
+textarea:focus, select:focus, .stepper input:focus, #customRatioInput:focus {
   outline: none;
   border-color: var(--primary);
   box-shadow: 0 0 0 3px rgba(15, 118, 110, 0.12);
@@ -184,6 +184,49 @@ textarea:focus, select:focus, .stepper input:focus {
 
 .api-block .field + .field {
   margin-top: 12px;
+}
+
+.model-block {
+  margin-top: 18px;
+  padding-top: 16px;
+  border-top: 1px solid var(--border);
+}
+
+.model-row {
+  display: flex;
+  align-items: flex-end;
+  gap: 10px;
+}
+
+.model-row .field {
+  flex: 1;
+  min-width: 0;
+}
+
+.secondary-btn {
+  flex: 0 0 auto;
+  height: 42px;
+  padding: 0 13px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  background: var(--surface);
+  color: var(--muted);
+  font-size: 13px;
+  cursor: pointer;
+  transition: color 0.15s, border-color 0.15s, background 0.15s;
+}
+.secondary-btn:hover:not(:disabled) {
+  color: var(--primary);
+  border-color: var(--primary);
+  background: #f2faf9;
+}
+.secondary-btn:disabled {
+  opacity: 0.55;
+  cursor: not-allowed;
+}
+
+.model-block .hint {
+  margin-top: 8px;
 }
 
 .key-wrap {
@@ -552,4 +595,6 @@ select:disabled {
   .composer, .output, .history { padding: 16px; }
   .option-grid { grid-template-columns: 1fr; }
   .option-grid .field:nth-child(3) { grid-column: auto; }
+  .model-row { align-items: stretch; flex-direction: column; }
+  .secondary-btn { width: 100%; }
 }

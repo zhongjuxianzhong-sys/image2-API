@@ -20,6 +20,7 @@ Thanks for helping with Image2 Studio.
 Before submitting changes:
 
 - Run `python -m py_compile app.py`.
+- Run `python -m unittest discover -s tests`.
 - Start the app and verify `/api/health`.
 - If frontend behavior changes, check desktop and mobile views.
 - If packaging changes, run `.\build.ps1`.

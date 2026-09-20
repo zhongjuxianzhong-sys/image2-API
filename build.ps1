@@ -6,18 +6,27 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
+# 优先使用项目虚拟环境；没有时再回退到系统 Python。
+$venvPython = Join-Path $Root ".venv\Scripts\python.exe"
+if (Test-Path -LiteralPath $venvPython) {
+  $python = $venvPython
+  $pythonArgs = @()
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
+  $python = "py"
+  $pythonArgs = @("-3")
+} elseif (Get-Command python -ErrorAction SilentlyContinue) {
+  $python = "python"
+  $pythonArgs = @()
+} else {
+  throw "未找到 Python。请先安装 Python 3.10+，或在本目录创建 .venv 后重试。"
+}
+
 # 确保依赖已安装
-python -m pip install --disable-pip-version-check -r requirements.txt
-python -m pip install --disable-pip-version-check pyinstaller
+& $python @pythonArgs -m pip install --disable-pip-version-check -r requirements.txt
+& $python @pythonArgs -m pip install --disable-pip-version-check pyinstaller
 
 Write-Host "开始打包..." -ForegroundColor Cyan
-python -m PyInstaller `
-  --noconfirm `
-  --clean `
-  --onefile `
-  --name Image2Studio `
-  --add-data "static;static" `
-  app.py
+& $python @pythonArgs -m PyInstaller --noconfirm --clean Image2Studio.spec
 
 # 随程序分发使用说明。
 Copy-Item -LiteralPath (Join-Path $Root "使用说明.txt") -Destination (Join-Path $Root "dist\使用说明.txt") -Force

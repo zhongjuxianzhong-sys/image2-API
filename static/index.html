@@ -19,7 +19,7 @@
           </div>
           <div>
             <h1>Image2 生图工坊</h1>
-            <p class="subtitle">自行填写中转站地址与 Key，调用 gpt-image-2 生图</p>
+            <p class="subtitle">自行填写中转站地址与 Key，自动发现并调用生图模型</p>
           </div>
         </div>
         <div class="status-chip" id="statusChip">
@@ -49,23 +49,37 @@
             <div class="reference-preview" id="referencePreview" hidden></div>
           </div>
 
+          <div class="model-block">
+            <div class="model-row">
+              <label class="field">
+                <span class="field-label">模型</span>
+                <select id="modelSelect" disabled></select>
+              </label>
+              <button class="secondary-btn" type="button" id="refreshModelsBtn" disabled>刷新模型</button>
+            </div>
+            <p class="hint" id="modelHint">填写 API Key 与 Base URL 后自动获取可用生图模型。</p>
+          </div>
+
           <div class="option-grid">
             <label class="field">
               <span class="field-label">画幅</span>
               <select id="ratioSelect"></select>
             </label>
+            <label class="field" id="customRatioField" hidden>
+              <span class="field-label">自定义比例</span>
+              <input id="customRatioInput" type="text" inputmode="numeric" placeholder="例如 21:9" spellcheck="false" />
+            </label>
             <label class="field">
               <span class="field-label">分辨率</span>
               <select id="kSelect"></select>
             </label>
+            <label class="field" id="presetSizeField" hidden>
+              <span class="field-label">尺寸</span>
+              <select id="sizeSelect"></select>
+            </label>
             <label class="field">
               <span class="field-label">质量</span>
-              <select id="qualitySelect">
-                <option value="auto" selected>auto · 自动</option>
-                <option value="high">high · 高清</option>
-                <option value="medium">medium · 中等</option>
-                <option value="low">low · 快速</option>
-              </select>
+              <select id="qualitySelect"></select>
             </label>
             <label class="field">
               <span class="field-label">数量</span>
