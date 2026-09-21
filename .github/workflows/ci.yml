@@ -1,0 +1,71 @@
+name: CI
+
+on:
+  push:
+    branches:
+      - main
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Test (Python ${{ matrix.python-version }})
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version:
+          - "3.10"
+          - "3.13"
+
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v7
+
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+          cache-dependency-path: requirements.txt
+
+      - name: Install dependencies
+        run: python -m pip install --disable-pip-version-check -r requirements.txt
+
+      - name: Compile Python sources
+        run: python -m py_compile app.py client.py make_icon.py
+
+      - name: Run unit tests
+        run: python -m unittest discover -s tests -v
+
+      - name: Smoke test health endpoint
+        shell: pwsh
+        run: |
+          $stdout = Join-Path $env:RUNNER_TEMP "image2-health-out.log"
+          $stderr = Join-Path $env:RUNNER_TEMP "image2-health-err.log"
+          $process = Start-Process python -ArgumentList "app.py", "--port", "8877" -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          try {
+            $deadline = (Get-Date).AddSeconds(20)
+            do {
+              Start-Sleep -Milliseconds 300
+              try {
+                $response = Invoke-RestMethod -Uri "http://127.0.0.1:8877/api/health" -TimeoutSec 2
+              } catch {
+                $response = $null
+              }
+            } until ($response.ok -or (Get-Date) -ge $deadline)
+
+            if (-not $response.ok) {
+              Get-Content -LiteralPath $stdout, $stderr -ErrorAction SilentlyContinue
+              throw "Health endpoint did not become ready within 20 seconds."
+            }
+          } finally {
+            if ($process -and -not $process.HasExited) {
+              Stop-Process -Id $process.Id -Force -ErrorAction SilentlyContinue
+            }
+          }

@@ -118,6 +118,12 @@ curl.exe "http://127.0.0.1:8787/api/generate" `
 分发时把 `Image2Studio.exe` 与 `使用说明.txt` 发给使用者即可：双击 exe 后直接进入原生桌面客户端，
 不打开浏览器，也无需保持终端窗口。客户端内填写提供商地址与 API Key 后即可生图，关闭客户端窗口即可退出程序。
 
+## GitHub Actions
+
+- 推送到 `main` 或提交 Pull Request 时，CI 会在 Windows 上使用 Python 3.10 与 3.13 运行编译、单元测试和 `/api/health` 冒烟检查。
+- 推送 `v*` 标签（例如 `v1.0.0`）时，Release 工作流会打包 `Image2Studio.exe` 并创建 GitHub Release。
+- 也可以在 Actions 页面手动运行 “Build Windows release”，只生成可下载的构建产物，不创建 Release。
+
 ## 项目规范
 
 - [CHANGELOG.md](CHANGELOG.md)

@@ -6,17 +6,17 @@ $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $Root
 
-# 优先使用项目虚拟环境；没有时再回退到系统 Python。
+# 优先使用项目虚拟环境；没有时优先使用 PATH 中的 Python，再回退到 py 启动器。
 $venvPython = Join-Path $Root ".venv\Scripts\python.exe"
 if (Test-Path -LiteralPath $venvPython) {
   $python = $venvPython
   $pythonArgs = @()
-} elseif (Get-Command py -ErrorAction SilentlyContinue) {
-  $python = "py"
-  $pythonArgs = @("-3")
 } elseif (Get-Command python -ErrorAction SilentlyContinue) {
   $python = "python"
   $pythonArgs = @()
+} elseif (Get-Command py -ErrorAction SilentlyContinue) {
+  $python = "py"
+  $pythonArgs = @("-3")
 } else {
   throw "未找到 Python。请先安装 Python 3.10+，或在本目录创建 .venv 后重试。"
 }
