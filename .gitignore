@@ -1,5 +1,5 @@
 .env
-client-settings.json
+client-credentials.dat
 __pycache__/
 *.pyc
 .venv/

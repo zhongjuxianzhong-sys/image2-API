@@ -12,6 +12,7 @@ and this project does not use semantic versioning yet.
 - GPT Image、DALL-E 与 Doubao-Seedream 的多模型参数适配。
 - 模型能力驱动的尺寸、质量、数量和参考图控件联动。
 - 后端接口与模型分类单元测试。
+- 客户端可选“记住 Base URL 和 API Key”，凭据使用 Windows DPAPI 加密保存。
 
 ### Changed
 

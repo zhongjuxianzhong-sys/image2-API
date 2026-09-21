@@ -9,6 +9,7 @@ from __future__ import annotations
 import json
 import os
 import queue
+import secrets
 import threading
 import tkinter as tk
 from pathlib import Path
@@ -20,6 +21,143 @@ from PIL import Image, ImageTk
 from werkzeug.serving import make_server
 
 import app as backend
+
+
+CREDENTIALS_FILENAME = "client-credentials.dat"
+DPAPI_DESCRIPTION = "Image2 Studio credentials"
+
+
+class CredentialError(RuntimeError):
+    pass
+
+
+def _dpapi_blob(data: bytes) -> Any:
+    if os.name != "nt":
+        raise CredentialError("当前系统不支持 Windows DPAPI 加密。")
+    import ctypes
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    buffer = ctypes.create_string_buffer(data, len(data))
+    return DataBlob(len(data), ctypes.cast(buffer, ctypes.POINTER(ctypes.c_char))), buffer
+
+
+def _read_dpapi_output(blob: Any) -> bytes:
+    import ctypes
+    from ctypes import wintypes
+
+    if not blob.cbData or not blob.pbData:
+        return b""
+    return ctypes.string_at(blob.pbData, blob.cbData)
+
+
+def protect_credentials(data: bytes) -> bytes:
+    """使用当前 Windows 用户的 DPAPI 凭据加密数据。"""
+    if os.name != "nt":
+        raise CredentialError("当前系统不支持 Windows DPAPI 加密。")
+    import ctypes
+    from ctypes import wintypes
+
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    blob_in, _buffer = _dpapi_blob(data)
+    blob_out = DataBlob()
+
+    if not crypt32.CryptProtectData(
+        ctypes.byref(blob_in),
+        DPAPI_DESCRIPTION,
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(blob_out),
+    ):
+        raise CredentialError("Windows DPAPI 加密失败。")
+    try:
+        return _read_dpapi_output(blob_out)
+    finally:
+        if blob_out.pbData:
+            kernel32.LocalFree(blob_out.pbData)
+
+
+def unprotect_credentials(data: bytes) -> bytes:
+    """使用当前 Windows 用户的 DPAPI 凭据解密数据。"""
+    if os.name != "nt":
+        raise CredentialError("当前系统不支持 Windows DPAPI 解密。")
+    import ctypes
+    from ctypes import wintypes
+
+    crypt32 = ctypes.windll.crypt32
+    kernel32 = ctypes.windll.kernel32
+    from ctypes import wintypes
+
+    class DataBlob(ctypes.Structure):
+        _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
+
+    blob_in, _buffer = _dpapi_blob(data)
+    blob_out = DataBlob()
+
+    if not crypt32.CryptUnprotectData(
+        ctypes.byref(blob_in),
+        None,
+        None,
+        None,
+        None,
+        0,
+        ctypes.byref(blob_out),
+    ):
+        raise CredentialError("Windows DPAPI 解密失败，凭据可能不属于当前 Windows 用户。")
+    try:
+        return _read_dpapi_output(blob_out)
+    finally:
+        if blob_out.pbData:
+            kernel32.LocalFree(blob_out.pbData)
+
+
+def load_encrypted_credentials(path: Path) -> dict[str, str] | None:
+    try:
+        raw = path.read_bytes()
+    except FileNotFoundError:
+        return None
+    except OSError as exc:
+        raise CredentialError(f"读取凭据文件失败：{exc}") from exc
+
+    try:
+        payload = json.loads(unprotect_credentials(raw).decode("utf-8"))
+    except (CredentialError, UnicodeDecodeError, ValueError) as exc:
+        raise CredentialError(f"凭据文件无法解密：{exc}") from exc
+    if not isinstance(payload, dict):
+        raise CredentialError("凭据文件格式不正确。")
+    return {
+        "base_url": str(payload.get("base_url") or ""),
+        "api_key": str(payload.get("api_key") or ""),
+    }
+
+
+def save_encrypted_credentials(path: Path, base_url: str, api_key: str) -> None:
+    payload = json.dumps(
+        {"base_url": base_url, "api_key": api_key},
+        ensure_ascii=False,
+        separators=(",", ":"),
+    ).encode("utf-8")
+    encrypted = protect_credentials(payload)
+    temp_path = path.with_name(f".{path.name}.{secrets.token_hex(4)}.tmp")
+    try:
+        temp_path.write_bytes(encrypted)
+        os.replace(temp_path, path)
+    except OSError as exc:
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
+        raise CredentialError(f"保存凭据文件失败：{exc}") from exc
 
 
 class BackendThread(threading.Thread):
@@ -48,6 +186,7 @@ class Image2Client:
         self.preview_image: ImageTk.PhotoImage | None = None
         self.tasks: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.closing = False
+        self.credentials_path = backend.APP_DIR / CREDENTIALS_FILENAME
 
         self.root.title("Image2 生图工坊")
         self.root.geometry("1080x780")
@@ -104,8 +243,16 @@ class Image2Client:
         config_buttons = ttk.Frame(config)
         config_buttons.grid(row=4, column=0, sticky="ew")
         ttk.Button(config_buttons, text="刷新模型", command=self.refresh_models).pack(side="left")
-        ttk.Label(config, text="API Key 仅保存在当前运行期间，不写入配置文件。", foreground="#667085").grid(
-            row=5, column=0, sticky="w", pady=(8, 0)
+        self.remember_var = tk.BooleanVar(value=False)
+        ttk.Checkbutton(
+            config,
+            text="记住 Base URL 和 API Key",
+            variable=self.remember_var,
+            command=self._toggle_remember,
+        ).grid(row=5, column=0, sticky="w", pady=(8, 0))
+        self.remember_hint_var = tk.StringVar(value="未启用：关闭程序后不会保存凭据。")
+        ttk.Label(config, textvariable=self.remember_hint_var, foreground="#667085", wraplength=350).grid(
+            row=6, column=0, sticky="w", pady=(3, 0)
         )
 
         prompt_frame = ttk.LabelFrame(controls, text="提示词", padding=10)
@@ -201,23 +348,50 @@ class Image2Client:
     def _toggle_key(self) -> None:
         self.key_entry.configure(show="" if self.show_key_var.get() else "*")
 
+    def _toggle_remember(self) -> None:
+        if self.remember_var.get():
+            self.remember_hint_var.set(
+                "将使用 Windows DPAPI 加密保存到程序目录的 client-credentials.dat，仅当前 Windows 用户可解密。"
+            )
+            self._save_settings()
+        else:
+            self._delete_saved_credentials()
+            self.remember_hint_var.set("未启用：关闭程序后不会保存凭据。")
+
     def _load_settings(self) -> None:
-        settings_path = backend.APP_DIR / "client-settings.json"
         try:
-            data = json.loads(settings_path.read_text(encoding="utf-8"))
-            self.base_url_var.set(str(data.get("base_url") or ""))
-        except (OSError, ValueError):
-            pass
+            data = load_encrypted_credentials(self.credentials_path)
+        except CredentialError as exc:
+            self.remember_hint_var.set(str(exc))
+            return
+        if not data:
+            return
+        self.base_url_var.set(data.get("base_url", ""))
+        self.api_key_var.set(data.get("api_key", ""))
+        self.remember_var.set(True)
+        self.remember_hint_var.set(
+            "已启用：凭据使用 Windows DPAPI 加密保存在 client-credentials.dat。"
+        )
 
     def _save_settings(self) -> None:
-        settings_path = backend.APP_DIR / "client-settings.json"
+        if not self.remember_var.get():
+            return
+        base_url = self.base_url_var.get().strip()
+        api_key = self.api_key_var.get().strip()
+        if not base_url and not api_key:
+            return
         try:
-            settings_path.write_text(
-                json.dumps({"base_url": self.base_url_var.get().strip()}, ensure_ascii=False, indent=2),
-                encoding="utf-8",
-            )
-        except OSError:
+            save_encrypted_credentials(self.credentials_path, base_url, api_key)
+        except CredentialError as exc:
+            self.remember_hint_var.set(str(exc))
+
+    def _delete_saved_credentials(self) -> None:
+        try:
+            self.credentials_path.unlink()
+        except FileNotFoundError:
             pass
+        except OSError as exc:
+            self.remember_hint_var.set(f"删除凭据文件失败：{exc}")
 
     def _url(self, path: str) -> str:
         return f"{self.base_api}{path}"
