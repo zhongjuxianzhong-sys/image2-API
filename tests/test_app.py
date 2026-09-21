@@ -347,11 +347,116 @@ class ApiTests(unittest.TestCase):
             captured["json"],
             {
                 "model": "Doubao-Seedream-5.0-pro",
-                "prompt": "test",
-                "n": 1,
-                "size": "1024x1024",
+                "prompt": "test\n\n画幅比例：1:1。",
+                "size": "1K",
             },
         )
+
+    def test_generate_seedream_uses_resolution_tier(self):
+        cases = [
+            ("doubao-seedream-5-0-pro-260628", "1K", "3:4", "1K"),
+            ("doubao-seedream-5-0-pro-260628", "2K", "16:9", "2K"),
+            ("doubao-seedream-5-0-260128", "2K", "16:9", "2K"),
+            ("doubao-seedream-4-5-251128", "2K", "16:9", "2K"),
+            ("doubao-seedream-4-0-250828", "1K", "16:9", "1K"),
+        ]
+        for model, k, ratio, expected in cases:
+            with self.subTest(model=model, k=k, ratio=ratio):
+                captured = {}
+
+                def fake_post(url, **kwargs):
+                    captured["json"] = kwargs.get("json")
+                    return FakeResponse(
+                        payload={
+                            "data": [
+                                {
+                                    "b64_json": base64.b64encode(
+                                        b"\x89PNG\r\n\x1a\nabc"
+                                    ).decode("ascii")
+                                }
+                            ]
+                        }
+                    )
+
+                with mock.patch.object(image_app.HTTP, "post", side_effect=fake_post):
+                    response = self.client.post(
+                        "/api/generate",
+                        json={
+                            "model": model,
+                            "prompt": "test",
+                            "base_url": "https://example.com/v1",
+                            "api_key": "key",
+                            "ratio": ratio,
+                            "k": k,
+                            "n": 1,
+                        },
+                    )
+
+                self.assertEqual(response.status_code, 200)
+                self.assertEqual(captured["json"]["size"], expected)
+
+    def test_generate_seedream_retries_without_size_after_400(self):
+        bodies = []
+
+        def fake_post(url, **kwargs):
+            bodies.append(kwargs.get("json"))
+            if len(bodies) == 1:
+                return FakeResponse(
+                    status_code=400,
+                    payload={
+                        "error": {
+                            "message": "openai_error",
+                            "type": "bad_response_status_code",
+                            "code": "bad_response_status_code",
+                        }
+                    },
+                    text='{"error":{"message":"openai_error","code":"bad_response_status_code"}}',
+                )
+            return FakeResponse(
+                payload={
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\nabc").decode(
+                                "ascii"
+                            )
+                        }
+                    ]
+                }
+            )
+
+        with mock.patch.object(image_app.HTTP, "post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "model": "Doubao-Seedream-5.0-pro",
+                    "prompt": "test",
+                    "base_url": "https://example.com/v1",
+                    "api_key": "key",
+                    "ratio": "3:4",
+                    "k": "1K",
+                    "n": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(bodies[0]["size"], "1K")
+        self.assertNotIn("size", bodies[1])
+
+    def test_seedream_5_pro_rejects_multiple_images(self):
+        response = self.client.post(
+            "/api/generate",
+            json={
+                "model": "Doubao-Seedream-5.0-pro",
+                "prompt": "test",
+                "base_url": "https://example.com/v1",
+                "api_key": "key",
+                "ratio": "1:1",
+                "k": "1K",
+                "n": 2,
+            },
+        )
+        self.assertEqual(response.status_code, 400)
+        self.assertIn("数量只能在 1 到 1 之间", response.get_json()["error"])
 
     def test_generate_seedream_auto_omits_size(self):
         captured = {}
@@ -420,7 +525,43 @@ class ApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(captured["json"]["size"], "1024x439")
+        self.assertEqual(captured["json"]["size"], "1K")
+        self.assertIn("21:9", captured["json"]["prompt"])
+
+    def test_generate_seedream_keeps_ratio_in_prompt(self):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return FakeResponse(
+                payload={
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\nabc").decode(
+                                "ascii"
+                            )
+                        }
+                    ]
+                }
+            )
+
+        with mock.patch.object(image_app.HTTP, "post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "model": "doubao-seedream-5-0-pro-260628",
+                    "prompt": "test",
+                    "base_url": "https://example.com/v1",
+                    "api_key": "key",
+                    "ratio": "3:4",
+                    "k": "1K",
+                    "n": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["json"]["size"], "1K")
+        self.assertIn("3:4", captured["json"]["prompt"])
 
     def test_generate_custom_ratio_rejects_invalid_value(self):
         response = self.client.post(

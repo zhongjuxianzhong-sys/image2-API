@@ -18,6 +18,7 @@ import sys
 import threading
 import time
 import uuid
+import webbrowser
 from pathlib import Path
 from typing import Any
 
@@ -121,6 +122,138 @@ GPT_TIER_SIZES = {
         "5:4": "2784x2224",
         "4:5": "2224x2784",
         "21:9": "3808x1632",
+    },
+}
+SEEDREAM_TIER_SIZES = {
+    "5-0-pro": {
+        "1K": {
+            "1:1": "1024x1024",
+            "4:3": "1152x864",
+            "3:4": "864x1152",
+            "16:9": "1424x800",
+            "9:16": "800x1424",
+            "3:2": "1248x832",
+            "2:3": "832x1248",
+            "21:9": "1568x672",
+        },
+        "2K": {
+            "1:1": "2048x2048",
+            "4:3": "2368x1776",
+            "3:4": "1776x2368",
+            "16:9": "2816x1584",
+            "9:16": "1584x2816",
+            "3:2": "2496x1664",
+            "2:3": "1664x2496",
+            "21:9": "3136x1344",
+        },
+    },
+    "5-0-lite": {
+        "2K": {
+            "1:1": "2048x2048",
+            "4:3": "2304x1728",
+            "3:4": "1728x2304",
+            "16:9": "2848x1600",
+            "9:16": "1600x2848",
+            "3:2": "2496x1664",
+            "2:3": "1664x2496",
+            "21:9": "3136x1344",
+        },
+        "3K": {
+            "1:1": "3072x3072",
+            "4:3": "3456x2592",
+            "3:4": "2592x3456",
+            "16:9": "4096x2304",
+            "9:16": "2304x4096",
+            "3:2": "3744x2496",
+            "2:3": "2496x3744",
+            "21:9": "4704x2016",
+        },
+        "4K": {
+            "1:1": "4096x4096",
+            "4:3": "4704x3520",
+            "3:4": "3520x4704",
+            "16:9": "5504x3040",
+            "9:16": "3040x5504",
+            "3:2": "4992x3328",
+            "2:3": "3328x4992",
+            "21:9": "6240x2656",
+        },
+    },
+    "4-5": {
+        "2K": {
+            "1:1": "2048x2048",
+            "4:3": "2304x1728",
+            "3:4": "1728x2304",
+            "16:9": "2560x1440",
+            "9:16": "1440x2560",
+            "3:2": "2496x1664",
+            "2:3": "1664x2496",
+            "21:9": "3024x1296",
+        },
+        "4K": {
+            "1:1": "4096x4096",
+            "4:3": "4704x3520",
+            "3:4": "3520x4704",
+            "16:9": "5504x3040",
+            "9:16": "3040x5504",
+            "3:2": "4992x3328",
+            "2:3": "3328x4992",
+            "21:9": "6240x2656",
+        },
+    },
+    "4-0": {
+        "1K": {
+            "1:1": "1024x1024",
+            "4:3": "1152x864",
+            "3:4": "864x1152",
+            "16:9": "1280x720",
+            "9:16": "720x1280",
+            "3:2": "1248x832",
+            "2:3": "832x1248",
+            "21:9": "1512x648",
+        },
+        "2K": {
+            "1:1": "2048x2048",
+            "4:3": "2304x1728",
+            "3:4": "1728x2304",
+            "16:9": "2848x1600",
+            "9:16": "1600x2848",
+            "3:2": "2496x1664",
+            "2:3": "1664x2496",
+            "21:9": "3136x1344",
+        },
+        "4K": {
+            "1:1": "4096x4096",
+            "4:3": "4704x3520",
+            "3:4": "3520x4704",
+            "16:9": "5504x3040",
+            "9:16": "3040x5504",
+            "3:2": "4992x3328",
+            "2:3": "3328x4992",
+            "21:9": "6240x2656",
+        },
+    },
+}
+SEEDREAM_SIZE_LIMITS = {
+    "5-0-pro": {
+        "min_area": 921600,
+        "max_area": 4624220,
+        "target_areas": {"1K": 1048576, "2K": 4194304},
+    },
+    "5-0-lite": {
+        "min_area": 3686400,
+        "max_area": 16777216,
+        "target_areas": {"2K": 4194304, "3K": 9437184, "4K": 16777216},
+    },
+    "4-5": {
+        "min_area": 3686400,
+        "max_area": 16777216,
+        "target_areas": {"2K": 4194304, "4K": 16777216},
+    },
+    "4-0": {
+        "min_area": 921600,
+        "max_area": 16777216,
+        "target_areas": {"1K": 1048576, "2K": 4194304, "4K": 16777216},
     },
 }
 K_LONG_EDGE = {
@@ -233,13 +366,64 @@ def size_for_gpt_custom(value: Any, k: str) -> str | None:
     return f"{w}x{h}"
 
 
-def _ratio_k_sizes(ratios: list[str], k_levels: list[str]) -> list[str]:
+def size_for_seedream(ratio: str, k: str, profile: str | None = None) -> str | None:
+    """Seedream 使用官方推荐像素表；不能按长边缩放推导。"""
+    if ratio == "auto":
+        return None
+    if ratio == CUSTOM_RATIO:
+        return None
+    if profile in SEEDREAM_TIER_SIZES:
+        return SEEDREAM_TIER_SIZES[profile].get(k, {}).get(ratio)
+    return size_for(ratio, k)
+
+
+def size_for_seedream_custom_ratio(value: Any, k: str, profile: str | None = None) -> str | None:
+    parsed = parse_custom_ratio(value)
+    limits = SEEDREAM_SIZE_LIMITS.get(profile or "")
+    if not parsed or not limits:
+        return size_for_custom_ratio(value, k)
+
+    rw, rh = parsed
+    ratio = rw / rh
+    target_area = limits["target_areas"].get(k, limits["min_area"])
+    target_area = max(limits["min_area"], min(target_area, limits["max_area"]))
+
+    width = max(16, round((target_area * ratio) ** 0.5 / 16) * 16)
+    height = max(16, round(target_area / width / 16) * 16)
+    for _ in range(256):
+        area = width * height
+        if limits["min_area"] <= area <= limits["max_area"]:
+            break
+        if area > limits["max_area"]:
+            if width >= height:
+                width = max(16, width - 16)
+            else:
+                height = max(16, height - 16)
+        else:
+            if width >= height:
+                width += 16
+            else:
+                height += 16
+    return f"{width}x{height}"
+
+
+def _ratio_k_sizes(
+    ratios: list[str],
+    k_levels: list[str],
+    *,
+    size_profile: str = "long_edge",
+) -> list[str]:
     result = []
     for ratio in ratios:
         if ratio == CUSTOM_RATIO:
             continue
         for k in k_levels:
-            size = size_for(ratio, k)
+            if size_profile == "gpt":
+                size = size_for_gpt(ratio, k)
+            elif size_profile in SEEDREAM_TIER_SIZES:
+                size = size_for_seedream(ratio, k, size_profile)
+            else:
+                size = size_for(ratio, k)
             if size and size not in result:
                 result.append(size)
     return result
@@ -265,7 +449,11 @@ def _ratio_capabilities(
         "size_profile": size_profile,
         "ratios": active_ratios,
         "k_levels": list(k_levels),
-        "derived_sizes": _ratio_k_sizes(active_ratios, list(k_levels)),
+        "derived_sizes": _ratio_k_sizes(
+            active_ratios,
+            list(k_levels),
+            size_profile=size_profile,
+        ),
         "preset_sizes": [],
         "qualities": list(qualities),
         "max_n": max_n,
@@ -388,7 +576,9 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 ["1K", "2K"],
                 [],
                 ratios=seedream_ratios,
+                size_profile="5-0-pro",
                 edit_transport="generation_image_field",
+                max_n=1,
                 max_references=10,
                 extra=seedream_extra,
             )
@@ -401,6 +591,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 ["2K", "3K", "4K"],
                 [],
                 ratios=seedream_ratios,
+                size_profile="5-0-lite",
                 edit_transport="generation_image_field",
                 max_references=14,
                 extra=seedream_extra,
@@ -412,6 +603,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 ["2K", "4K"],
                 [],
                 ratios=seedream_ratios,
+                size_profile="4-5",
                 edit_transport="generation_image_field",
                 max_references=14,
                 extra=seedream_extra,
@@ -423,6 +615,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 ["1K", "2K", "4K"],
                 [],
                 ratios=seedream_ratios,
+                size_profile="4-0",
                 edit_transport="generation_image_field",
                 max_references=14,
                 extra=seedream_extra,
@@ -434,6 +627,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 ["1K"],
                 [],
                 ratios=seedream_ratios,
+                size_profile="4-0",
                 edits=False,
                 edit_transport="none",
                 max_references=0,
@@ -445,6 +639,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 ["1K", "2K", "4K"],
                 [],
                 ratios=seedream_ratios,
+                size_profile="4-0",
                 edit_transport="generation_image_field",
                 max_references=14,
                 extra=seedream_extra,
@@ -778,8 +973,11 @@ def _resolve_size(payload: Any, capabilities: dict[str, Any]) -> tuple[str | Non
         )
 
     if ratio == CUSTOM_RATIO:
-        if capabilities.get("size_profile") == "gpt":
+        size_profile = capabilities.get("size_profile")
+        if size_profile == "gpt":
             derived = size_for_gpt_custom(payload.get("custom_ratio"), k)
+        elif size_profile in SEEDREAM_TIER_SIZES:
+            derived = k
         else:
             derived = size_for_custom_ratio(payload.get("custom_ratio"), k)
         if not derived:
@@ -791,8 +989,13 @@ def _resolve_size(payload: Any, capabilities: dict[str, Any]) -> tuple[str | Non
             return None, "自定义比例与 size 参数不能同时指定不同的像素尺寸。"
         return derived, None
 
-    if capabilities.get("size_profile") == "gpt":
+    size_profile = capabilities.get("size_profile")
+    if size_profile == "gpt":
         derived = size_for_gpt(ratio, k)
+    elif size_profile in SEEDREAM_TIER_SIZES:
+        # 火山方舟的 Seedream 同时接受档位（1K/2K）和精确像素，但部分中转站
+        # 只转发档位写法。优先使用档位，可避免中转站因像素值返回 400。
+        derived = k
     else:
         derived = size_for(ratio, k)
     if not derived:
@@ -842,8 +1045,9 @@ def _seedream_body(
     body: dict[str, Any] = {
         "model": model,
         "prompt": prompt,
-        "n": n,
     }
+    if n > 1:
+        body["n"] = n
     if size:
         body["size"] = size
     if len(images) == 1:
@@ -854,6 +1058,23 @@ def _seedream_body(
         body["sequential_image_generation"] = "auto"
         body["sequential_image_generation_options"] = {"max_images": n}
     return body
+
+
+def _seedream_size_fallbacks(size: str | None) -> list[str | None]:
+    """返回尺寸兼容尝试顺序：档位 -> 省略 -> 自动。"""
+    if not size:
+        return [None]
+    if size.lower() in {"1k", "1.5k", "2k", "3k", "4k", "auto"}:
+        return [size, None]
+    return [size, None]
+
+
+def _seedream_prompt(prompt: str, ratio: str, custom_ratio: str = "") -> str:
+    """把画幅写入提示词；Seedream 档位模式需要提示词描述宽高比。"""
+    ratio_text = custom_ratio if ratio == CUSTOM_RATIO else ratio
+    if not ratio_text or ratio_text == "auto" or ratio_text in prompt:
+        return prompt
+    return f"{prompt.rstrip()}\n\n画幅比例：{ratio_text}。"
 
 
 @app.post("/api/generate")
@@ -912,16 +1133,31 @@ def generate():
     try:
         if edit_transport == "generation_image_field":
             images = _files_to_data_urls(files) if files else list(json_images)
-            body = _seedream_body(model, prompt, size, n, images)
-            resp = _post_with_retry(
-                f"{override_base}/images/generations",
-                headers={
-                    "Authorization": f"Bearer {key}",
-                    "Content-Type": "application/json",
-                },
-                json=body,
-                timeout=GENERATION_TIMEOUT,
+            upstream_prompt = _seedream_prompt(
+                prompt,
+                _clean_text(payload.get("ratio")),
+                _clean_text(payload.get("custom_ratio")),
             )
+            headers = {
+                "Authorization": f"Bearer {key}",
+                "Content-Type": "application/json",
+            }
+            resp = None
+            last_response = None
+            for candidate_size in _seedream_size_fallbacks(size):
+                body = _seedream_body(model, upstream_prompt, candidate_size, n, images)
+                candidate = _post_with_retry(
+                    f"{override_base}/images/generations",
+                    headers=headers,
+                    json=body,
+                    timeout=GENERATION_TIMEOUT,
+                )
+                last_response = candidate
+                if candidate.status_code != 400:
+                    resp = candidate
+                    break
+            if resp is None:
+                resp = last_response
         elif has_reference:
             files_args = []
             for idx, item in enumerate(files):
@@ -1102,7 +1338,32 @@ def _summarize_http_error(resp: requests.Response) -> str:
         return f"中转站服务异常（{status}）。请稍后重试。"
     if "invalid_api_key" in text:
         return "无效 API key。请检查界面里填写的 key 与 Base URL 是否属于同一个中转站。"
+    detail = _extract_error_detail(resp)
+    if "bad_response_status_code" in text:
+        message = f"：{detail}" if detail and detail.lower() != "openai_error" else ""
+        return (
+            f"上游拒绝了本次请求（{status}，bad_response_status_code）{message}。"
+            "请检查画幅/分辨率、提示词长度和参考图是否符合该豆包模型的要求。"
+        )
+    if status == 400:
+        return f"中转站参数被拒绝（400）：{detail or resp.text[:240]}"
     return f"中转站返回错误（{status}）：{resp.text[:160]}"
+
+
+def _extract_error_detail(resp: requests.Response) -> str:
+    try:
+        data = resp.json()
+    except ValueError:
+        return ""
+    error = data.get("error") if isinstance(data, dict) else None
+    if isinstance(error, dict):
+        for key in ("message", "code"):
+            value = error.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(error, str) and error.strip():
+        return error.strip()
+    return ""
 
 
 def _extract_image_error(images: list[Any]) -> str | None:
@@ -1192,5 +1453,16 @@ def _resolve_port(default: int = 8787) -> int:
         return default
 
 
+def _open_browser(port: int) -> None:
+    """启动打包版时自动打开前端页面，不阻塞 Flask 服务启动。"""
+    url = f"http://127.0.0.1:{port}"
+    browser_timer = threading.Timer(0.8, webbrowser.open, args=(url,))
+    browser_timer.daemon = True
+    browser_timer.start()
+
+
 if __name__ == "__main__":
-    app.run(host="127.0.0.1", port=_resolve_port(), debug=False, threaded=True)
+    port = _resolve_port()
+    if IS_FROZEN:
+        _open_browser(port)
+    app.run(host="127.0.0.1", port=port, debug=False, threaded=True)

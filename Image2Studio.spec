@@ -2,7 +2,7 @@
 
 
 a = Analysis(
-    ['app.py'],
+    ['client.py'],
     pathex=[],
     binaries=[],
     datas=[('static', 'static')],
@@ -22,6 +22,7 @@ exe = EXE(
     a.binaries,
     a.datas,
     [],
+    icon='assets/Image2Studio.ico',
     name='Image2Studio',
     debug=False,
     bootloader_ignore_signals=False,
@@ -29,7 +30,7 @@ exe = EXE(
     upx=True,
     upx_exclude=[],
     runtime_tmpdir=None,
-    console=True,
+    console=False,
     disable_windowed_traceback=False,
     argv_emulation=False,
     target_arch=None,
