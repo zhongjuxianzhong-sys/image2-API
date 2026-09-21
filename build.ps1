@@ -47,6 +47,13 @@ if (Test-Path -LiteralPath $staleEnv) {
   Write-Host "已删除 dist\.env（打包不携带任何 key）。" -ForegroundColor Yellow
 }
 
+# 旧版本曾用明文文件保存 Base URL；新版本统一使用加密凭据文件。
+$staleSettings = Join-Path $Root "dist\client-settings.json"
+if (Test-Path -LiteralPath $staleSettings) {
+  Remove-Item -LiteralPath $staleSettings -Force
+  Write-Host "已删除 dist\client-settings.json（旧版明文配置）。" -ForegroundColor Yellow
+}
+
 Write-Host "打包完成：$Root\dist\Image2Studio.exe" -ForegroundColor Green
 Get-ChildItem -LiteralPath (Join-Path $Root "dist") -Force |
   Where-Object { -not $_.PSIsContainer } |

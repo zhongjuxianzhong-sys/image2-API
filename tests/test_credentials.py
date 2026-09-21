@@ -6,6 +6,14 @@ from pathlib import Path
 import client
 
 
+class ClientPreferenceTests(unittest.TestCase):
+    def test_preferred_k_level_prefers_2k(self):
+        self.assertEqual(client.preferred_k_level(["1K", "2K", "4K"]), "2K")
+
+    def test_preferred_k_level_uses_first_available_without_2k(self):
+        self.assertEqual(client.preferred_k_level(["1K"]), "1K")
+
+
 @unittest.skipUnless(os.name == "nt", "Windows DPAPI is only available on Windows")
 class CredentialStorageTests(unittest.TestCase):
     def test_round_trip_encrypted_credentials(self):

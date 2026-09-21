@@ -31,6 +31,12 @@ class CredentialError(RuntimeError):
     pass
 
 
+def preferred_k_level(k_levels: list[str]) -> str:
+    if "2K" in k_levels:
+        return "2K"
+    return k_levels[0] if k_levels else ""
+
+
 def _dpapi_blob(data: bytes) -> Any:
     if os.name != "nt":
         raise CredentialError("当前系统不支持 Windows DPAPI 加密。")
@@ -469,8 +475,9 @@ class Image2Client:
         self.quality_combo.configure(values=caps.get("qualities") or [], state="readonly" if caps.get("qualities") else "disabled")
         if caps.get("ratios"):
             self.ratio_var.set(caps["ratios"][0])
-        if caps.get("k_levels"):
-            self.k_var.set(caps["k_levels"][0])
+        preferred_k = preferred_k_level(caps.get("k_levels") or [])
+        if preferred_k:
+            self.k_var.set(preferred_k)
         if caps.get("preset_sizes"):
             self.size_var.set(caps["preset_sizes"][0].get("value", ""))
         if caps.get("qualities"):

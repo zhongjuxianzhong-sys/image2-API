@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest import mock
 
 import app as image_app
+from PIL import Image
 
 
 class FakeResponse:
@@ -55,7 +56,7 @@ class ModelDiscoveryTests(unittest.TestCase):
     def test_seedream_capabilities_are_version_specific(self):
         cases = {
             "doubao-seedream-5-0-pro-260628": ["1K", "2K"],
-            "doubao-seedream-5-0-260128": ["2K", "3K", "4K"],
+            "doubao-seedream-5-0-260128": ["2K", "3K"],
             "doubao-seedream-4-5-251128": ["2K", "4K"],
             "doubao-seedream-4-0-250828": ["1K", "2K", "4K"],
         }
@@ -348,17 +349,18 @@ class ApiTests(unittest.TestCase):
             {
                 "model": "Doubao-Seedream-5.0-pro",
                 "prompt": "test\n\n画幅比例：1:1。",
-                "size": "1K",
+                "size": "1024x1024",
             },
         )
 
-    def test_generate_seedream_uses_resolution_tier(self):
+    def test_generate_seedream_uses_exact_pixel_size(self):
         cases = [
-            ("doubao-seedream-5-0-pro-260628", "1K", "3:4", "1K"),
-            ("doubao-seedream-5-0-pro-260628", "2K", "16:9", "2K"),
-            ("doubao-seedream-5-0-260128", "2K", "16:9", "2K"),
-            ("doubao-seedream-4-5-251128", "2K", "16:9", "2K"),
-            ("doubao-seedream-4-0-250828", "1K", "16:9", "1K"),
+            ("doubao-seedream-5-0-pro-260628", "1K", "3:4", "864x1152"),
+            ("doubao-seedream-5-0-pro-260628", "2K", "16:9", "2816x1584"),
+            ("doubao-seedream-5-0-260128", "2K", "16:9", "2848x1600"),
+            ("doubao-seedream-5-0-260128", "3K", "16:9", "4096x2304"),
+            ("doubao-seedream-4-5-251128", "2K", "16:9", "2560x1440"),
+            ("doubao-seedream-4-0-250828", "1K", "16:9", "1280x720"),
         ]
         for model, k, ratio, expected in cases:
             with self.subTest(model=model, k=k, ratio=ratio):
@@ -395,12 +397,12 @@ class ApiTests(unittest.TestCase):
                 self.assertEqual(response.status_code, 200)
                 self.assertEqual(captured["json"]["size"], expected)
 
-    def test_generate_seedream_retries_without_size_after_400(self):
+    def test_generate_seedream_falls_back_to_tier_then_omits_size(self):
         bodies = []
 
         def fake_post(url, **kwargs):
             bodies.append(kwargs.get("json"))
-            if len(bodies) == 1:
+            if len(bodies) < 3:
                 return FakeResponse(
                     status_code=400,
                     payload={
@@ -439,8 +441,9 @@ class ApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(bodies[0]["size"], "1K")
-        self.assertNotIn("size", bodies[1])
+        self.assertEqual(bodies[0]["size"], "864x1152")
+        self.assertEqual(bodies[1]["size"], "1K")
+        self.assertNotIn("size", bodies[2])
 
     def test_seedream_5_pro_rejects_multiple_images(self):
         response = self.client.post(
@@ -525,7 +528,7 @@ class ApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(captured["json"]["size"], "1K")
+        self.assertEqual(captured["json"]["size"], "1568x672")
         self.assertIn("21:9", captured["json"]["prompt"])
 
     def test_generate_seedream_keeps_ratio_in_prompt(self):
@@ -560,8 +563,84 @@ class ApiTests(unittest.TestCase):
             )
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(captured["json"]["size"], "1K")
+        self.assertEqual(captured["json"]["size"], "864x1152")
         self.assertIn("3:4", captured["json"]["prompt"])
+
+    def test_generate_seedream_3_t2i_does_not_fall_back_to_tier(self):
+        bodies = []
+
+        def fake_post(url, **kwargs):
+            bodies.append(kwargs.get("json"))
+            if len(bodies) == 1:
+                return FakeResponse(status_code=400, text="bad size")
+            return FakeResponse(
+                payload={
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(
+                                b"\x89PNG\r\n\x1a\nabc"
+                            ).decode("ascii")
+                        }
+                    ]
+                }
+            )
+
+        with mock.patch.object(image_app.HTTP, "post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "model": "doubao-seedream-3-0-t2i-250415",
+                    "prompt": "test",
+                    "base_url": "https://example.com/v1",
+                    "api_key": "key",
+                    "ratio": "16:9",
+                    "k": "1K",
+                    "n": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(bodies[0]["size"], "1280x720")
+        self.assertNotIn("size", bodies[1])
+
+    def test_generate_reports_actual_image_size(self):
+        image_buffer = io.BytesIO()
+        Image.new("RGB", (321, 123), color="white").save(image_buffer, format="PNG")
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return FakeResponse(
+                payload={
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(image_buffer.getvalue()).decode(
+                                "ascii"
+                            )
+                        }
+                    ]
+                }
+            )
+
+        with mock.patch.object(image_app.HTTP, "post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "model": "doubao-seedream-4-5-251128",
+                    "prompt": "test",
+                    "base_url": "https://example.com/v1",
+                    "api_key": "key",
+                    "ratio": "16:9",
+                    "k": "2K",
+                    "n": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        data = response.get_json()
+        self.assertEqual(captured["json"]["size"], "2560x1440")
+        self.assertEqual(data["images"][0]["size"], "321x123")
+        self.assertEqual(data["meta"]["size"], "321x123")
 
     def test_generate_custom_ratio_rejects_invalid_value(self):
         response = self.client.post(

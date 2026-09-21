@@ -12,6 +12,7 @@ from __future__ import annotations
 import base64
 import binascii
 import copy
+import io
 import json
 import os
 import sys
@@ -24,6 +25,7 @@ from typing import Any
 
 import requests
 from flask import Flask, jsonify, request, send_from_directory
+from PIL import Image
 
 
 # ---------------------------------------------------------------------------
@@ -168,16 +170,6 @@ SEEDREAM_TIER_SIZES = {
             "2:3": "2496x3744",
             "21:9": "4704x2016",
         },
-        "4K": {
-            "1:1": "4096x4096",
-            "4:3": "4704x3520",
-            "3:4": "3520x4704",
-            "16:9": "5504x3040",
-            "9:16": "3040x5504",
-            "3:2": "4992x3328",
-            "2:3": "3328x4992",
-            "21:9": "6240x2656",
-        },
     },
     "4-5": {
         "2K": {
@@ -243,7 +235,7 @@ SEEDREAM_SIZE_LIMITS = {
     "5-0-lite": {
         "min_area": 3686400,
         "max_area": 16777216,
-        "target_areas": {"2K": 4194304, "3K": 9437184, "4K": 16777216},
+        "target_areas": {"2K": 4194304, "3K": 9437184},
     },
     "4-5": {
         "min_area": 3686400,
@@ -435,6 +427,7 @@ def _ratio_capabilities(
     *,
     ratios: list[str] | None = None,
     size_profile: str = "long_edge",
+    tier_fallback: bool = True,
     edits: bool | str = True,
     edit_transport: str = "multipart",
     max_n: int = 4,
@@ -447,6 +440,7 @@ def _ratio_capabilities(
         "edit_transport": edit_transport,
         "size_mode": "ratio_and_k",
         "size_profile": size_profile,
+        "tier_fallback": tier_fallback,
         "ratios": active_ratios,
         "k_levels": list(k_levels),
         "derived_sizes": _ratio_k_sizes(
@@ -588,7 +582,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
             label = "Doubao-Seedream 5.0 lite"
             order = 71
             capabilities = _ratio_capabilities(
-                ["2K", "3K", "4K"],
+                ["2K", "3K"],
                 [],
                 ratios=seedream_ratios,
                 size_profile="5-0-lite",
@@ -629,7 +623,9 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 ratios=seedream_ratios,
                 size_profile="4-0",
                 edits=False,
-                edit_transport="none",
+                edit_transport="generation_image_field",
+                tier_fallback=False,
+                max_n=1,
                 max_references=0,
                 extra=seedream_extra,
             )
@@ -977,7 +973,11 @@ def _resolve_size(payload: Any, capabilities: dict[str, Any]) -> tuple[str | Non
         if size_profile == "gpt":
             derived = size_for_gpt_custom(payload.get("custom_ratio"), k)
         elif size_profile in SEEDREAM_TIER_SIZES:
-            derived = k
+            derived = size_for_seedream_custom_ratio(
+                payload.get("custom_ratio"),
+                k,
+                size_profile,
+            )
         else:
             derived = size_for_custom_ratio(payload.get("custom_ratio"), k)
         if not derived:
@@ -993,9 +993,7 @@ def _resolve_size(payload: Any, capabilities: dict[str, Any]) -> tuple[str | Non
     if size_profile == "gpt":
         derived = size_for_gpt(ratio, k)
     elif size_profile in SEEDREAM_TIER_SIZES:
-        # 火山方舟的 Seedream 同时接受档位（1K/2K）和精确像素，但部分中转站
-        # 只转发档位写法。优先使用档位，可避免中转站因像素值返回 400。
-        derived = k
+        derived = size_for_seedream(ratio, k, size_profile)
     else:
         derived = size_for(ratio, k)
     if not derived:
@@ -1060,13 +1058,18 @@ def _seedream_body(
     return body
 
 
-def _seedream_size_fallbacks(size: str | None) -> list[str | None]:
-    """返回尺寸兼容尝试顺序：档位 -> 省略 -> 自动。"""
+def _seedream_size_fallbacks(
+    size: str | None,
+    tier: str | None = None,
+) -> list[str | None]:
+    """返回尺寸兼容尝试顺序：精确像素 -> 档位 -> 省略。"""
     if not size:
         return [None]
-    if size.lower() in {"1k", "1.5k", "2k", "3k", "4k", "auto"}:
-        return [size, None]
-    return [size, None]
+    candidates: list[str | None] = [size]
+    if tier and tier.lower() != size.lower():
+        candidates.append(tier)
+    candidates.append(None)
+    return candidates
 
 
 def _seedream_prompt(prompt: str, ratio: str, custom_ratio: str = "") -> str:
@@ -1144,7 +1147,12 @@ def generate():
             }
             resp = None
             last_response = None
-            for candidate_size in _seedream_size_fallbacks(size):
+            tier = (
+                _clean_text(payload.get("k"))
+                if capabilities.get("tier_fallback")
+                else None
+            )
+            for candidate_size in _seedream_size_fallbacks(size, tier):
                 body = _seedream_body(model, upstream_prompt, candidate_size, n, images)
                 candidate = _post_with_retry(
                     f"{override_base}/images/generations",
@@ -1232,12 +1240,12 @@ def generate():
     saved = []
     try:
         for index, item in enumerate(images):
-            filename = _save_image(item, size, index)
+            filename, actual_size = _save_image(item, size, index)
             saved.append(
                 {
                     "url": f"/outputs/{filename}",
                     "filename": filename,
-                    "size": size,
+                    "size": actual_size,
                     "quality": quality,
                     "model": model,
                 }
@@ -1257,7 +1265,7 @@ def generate():
             "prompt": prompt,
             "ratio": _clean_text(payload.get("ratio")),
             "k": _clean_text(payload.get("k")),
-            "size": size,
+            "size": img["size"],
             "quality": quality,
             "reference": bool(has_reference),
             "created_at": created_at,
@@ -1273,7 +1281,7 @@ def generate():
             "images": saved,
             "meta": {
                 "model": model,
-                "size": size,
+                "size": saved[0]["size"] if saved else size,
                 "ratio": _clean_text(payload.get("ratio")),
                 "k": _clean_text(payload.get("k")),
                 "quality": quality,
@@ -1405,7 +1413,11 @@ def _image_extension(raw: bytes, content_type: str = "") -> str:
     return ".png"
 
 
-def _save_image(item: dict[str, Any], size: str | None, index: int) -> str:
+def _save_image(
+    item: dict[str, Any],
+    size: str | None,
+    index: int,
+) -> tuple[str, str | None]:
     if not isinstance(item, dict):
         raise ValueError("响应图片项格式不正确")
 
@@ -1431,7 +1443,15 @@ def _save_image(item: dict[str, Any], size: str | None, index: int) -> str:
     filename = f"image2-{stamp}-{uuid.uuid4().hex[:8]}-{index + 1}{extension}"
     target = OUTPUT_DIR / filename
     target.write_bytes(raw)
-    return filename
+    return filename, _actual_image_size(raw, size)
+
+
+def _actual_image_size(raw: bytes, fallback: str | None) -> str | None:
+    try:
+        with Image.open(io.BytesIO(raw)) as image:
+            return f"{image.width}x{image.height}"
+    except (OSError, ValueError):
+        return fallback
 
 
 def _resolve_port(default: int = 8787) -> int:

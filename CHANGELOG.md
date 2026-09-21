@@ -19,11 +19,14 @@ and this project does not use semantic versioning yet.
 - 生成接口从固定 `gpt-image-2` 改为按请求中的 `model` 调用。
 - GPT Image 参考图继续使用 `/images/edits`，Seedream 参考图使用 `/images/generations` 的 `image` 字段。
 - GPT Image 2 / 2.5 使用 1K / 2K / 4K 标准像素表，质量按档位映射为 `standard / hd / 4k`。
+- Seedream 优先发送推荐精确像素，失败时回退到档位；客户端默认优先选择 2K。
 
 ### Fixed
 
 - 上游返回 `data: null` 或空图片项时不再产生 500 或 0 字节图片。
 - 历史记录写入增加进程内锁与原子替换，降低并发覆盖风险。
+- 结果与历史记录改为显示生成图片的真实像素尺寸。
+- Seedream 5.0 lite 的分辨率选项修正为官方支持的 2K / 3K。
 
 ### Documentation
 
