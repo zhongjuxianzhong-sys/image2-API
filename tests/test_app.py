@@ -105,6 +105,36 @@ class ModelDiscoveryTests(unittest.TestCase):
         self.assertIsNone(image_app.parse_custom_ratio("17:1"))
         self.assertIsNone(image_app.parse_custom_ratio("abc"))
 
+    def test_gpt_image_point_releases_keep_their_family(self):
+        cases = {
+            "gpt-image-2.5": ("gpt-image-2.5", "GPT Image 2.5"),
+            "gpt-image-2.5-flare": ("gpt-image-2.5", "GPT Image 2.5"),
+            "gpt-image-2": ("gpt-image-2", "GPT Image 2"),
+            "gpt-image-1.5": ("gpt-image-1.5", "GPT Image 1.5"),
+            "gpt-image-1.5-2025-12-01": ("gpt-image-1.5", "GPT Image 1.5"),
+            "gpt-image-1-mini": ("gpt-image-1-mini", "GPT Image 1 mini"),
+            "gpt-image-1": ("gpt-image-1", "GPT Image 1"),
+        }
+        for model_id, expected in cases.items():
+            with self.subTest(model_id=model_id):
+                item = image_app.model_identity(model_id)
+                self.assertEqual((item["family"], item["label"]), expected)
+
+        ordered = [
+            item["id"]
+            for item in image_app.list_image_models(
+                ["gpt-image-2", "gpt-image-1.5", "gpt-image-2.5"]
+            )
+        ]
+        self.assertEqual(ordered, ["gpt-image-2.5", "gpt-image-2", "gpt-image-1.5"])
+
+    def test_gpt_image_quality_defaults_to_tier_mapping(self):
+        for model_id in ("gpt-image-2", "gpt-image-2.5"):
+            with self.subTest(model_id=model_id):
+                qualities = image_app.model_identity(model_id)["capabilities"]["qualities"]
+                self.assertEqual(qualities[0], "auto")
+                self.assertIn("hd", qualities)
+
 
 class ApiTests(unittest.TestCase):
     def setUp(self):
@@ -705,6 +735,82 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/api/history")
         self.assertEqual(response.status_code, 200)
         self.assertEqual(response.get_json()["items"], legacy)
+
+    def test_generate_gpt_auto_quality_maps_to_tier_quality(self):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured["json"] = kwargs.get("json")
+            return FakeResponse(
+                payload={
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\nabc").decode(
+                                "ascii"
+                            )
+                        }
+                    ]
+                }
+            )
+
+        with mock.patch.object(image_app.HTTP, "post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/generate",
+                json={
+                    "model": "gpt-image-2",
+                    "prompt": "test",
+                    "base_url": "https://example.com/v1",
+                    "api_key": "key",
+                    "ratio": "16:9",
+                    "k": "2K",
+                    "quality": "auto",
+                    "n": 1,
+                },
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(captured["json"]["size"], "2560x1440")
+        self.assertEqual(captured["json"]["quality"], "hd")
+
+    def test_octet_stream_reference_becomes_image_data_url(self):
+        captured = {}
+
+        def fake_post(url, **kwargs):
+            captured.update(kwargs)
+            return FakeResponse(
+                payload={
+                    "data": [
+                        {
+                            "b64_json": base64.b64encode(b"\x89PNG\r\n\x1a\nabc").decode(
+                                "ascii"
+                            )
+                        }
+                    ]
+                }
+            )
+
+        with mock.patch.object(image_app.HTTP, "post", side_effect=fake_post):
+            response = self.client.post(
+                "/api/generate",
+                data={
+                    "model": "doubao-seedream-4-0-250828",
+                    "prompt": "test",
+                    "base_url": "https://example.com/v1",
+                    "api_key": "key",
+                    "ratio": "1:1",
+                    "k": "2K",
+                    "n": "1",
+                    "image": (
+                        io.BytesIO(b"\x89PNG\r\n\x1a\nabc"),
+                        "ref.png",
+                        "application/octet-stream",
+                    ),
+                },
+                content_type="multipart/form-data",
+            )
+
+        self.assertEqual(response.status_code, 200)
+        self.assertTrue(captured["json"]["image"].startswith("data:image/png;base64,"))
 
 
 if __name__ == "__main__":

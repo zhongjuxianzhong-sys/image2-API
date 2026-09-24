@@ -7,6 +7,7 @@ Flask 后端在同一进程的后台线程中运行，Tkinter 提供桌面界面
 from __future__ import annotations
 
 import json
+import mimetypes
 import os
 import queue
 import secrets
@@ -37,6 +38,12 @@ def preferred_k_level(k_levels: list[str]) -> str:
     return k_levels[0] if k_levels else ""
 
 
+def reference_mime_type(path: str | Path) -> str:
+    """按扩展名推断参考图 MIME；识别不出时交给后端按文件内容判断。"""
+    guessed, _ = mimetypes.guess_type(str(path))
+    return guessed or "application/octet-stream"
+
+
 def _dpapi_blob(data: bytes) -> Any:
     if os.name != "nt":
         raise CredentialError("当前系统不支持 Windows DPAPI 加密。")
@@ -52,7 +59,6 @@ def _dpapi_blob(data: bytes) -> Any:
 
 def _read_dpapi_output(blob: Any) -> bytes:
     import ctypes
-    from ctypes import wintypes
 
     if not blob.cbData or not blob.pbData:
         return b""
@@ -68,7 +74,6 @@ def protect_credentials(data: bytes) -> bytes:
 
     crypt32 = ctypes.windll.crypt32
     kernel32 = ctypes.windll.kernel32
-    from ctypes import wintypes
 
     class DataBlob(ctypes.Structure):
         _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
@@ -102,7 +107,6 @@ def unprotect_credentials(data: bytes) -> bytes:
 
     crypt32 = ctypes.windll.crypt32
     kernel32 = ctypes.windll.kernel32
-    from ctypes import wintypes
 
     class DataBlob(ctypes.Structure):
         _fields_ = [("cbData", wintypes.DWORD), ("pbData", ctypes.POINTER(ctypes.c_char))]
@@ -483,7 +487,7 @@ class Image2Client:
         if caps.get("qualities"):
             self.quality_var.set(caps["qualities"][0])
         max_n = int(caps.get("max_n") or 1)
-        self.count_var.set(min(max(1, self.count_var.get()), max_n))
+        self.count_var.set(min(self._read_count(), max_n))
         self.count_spinbox.configure(to=max_n)
         self._sync_ratio()
         max_refs = int(caps.get("max_references") or 0)
@@ -543,6 +547,13 @@ class Image2Client:
         self.reference_paths = []
         self.reference_var.set("未选择参考图")
 
+    def _read_count(self) -> int:
+        """Spinbox 允许手输，非法内容按 1 处理，避免 TclError 打断回调。"""
+        try:
+            return max(1, int(self.count_var.get()))
+        except (tk.TclError, ValueError):
+            return 1
+
     def generate(self) -> None:
         prompt = self.prompt.get("1.0", "end").strip()
         if not prompt:
@@ -565,7 +576,7 @@ class Image2Client:
             "k": self.k_var.get(),
             "size": self.size_var.get(),
             "quality": self.quality_var.get(),
-            "n": self.count_var.get(),
+            "n": self._read_count(),
         }
         self._run_task("generate", lambda: self._request_generate(args))
 
@@ -590,7 +601,7 @@ class Image2Client:
                 for path in args["references"]:
                     handle = open(path, "rb")
                     handles.append(handle)
-                    files.append(("image", (Path(path).name, handle, "application/octet-stream")))
+                    files.append(("image", (Path(path).name, handle, reference_mime_type(path))))
                 response = requests.post(self._url("/api/generate"), data=payload, files=files, timeout=360)
             else:
                 payload["base_url"] = args["base_url"]

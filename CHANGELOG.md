@@ -23,6 +23,11 @@ and this project does not use semantic versioning yet.
 
 ### Fixed
 
+- 修正 GPT Image 2.5 / 1.5 的家族识别：模型 ID 归一化后不再被误判为 GPT Image 2 / 1。
+- 修正 GPT Image 2 / 2.5 的质量档位映射：质量选 `auto` 时按 1K / 2K / 4K 映射为 `standard / hd / 4k`。
+- 修正桌面客户端参考图上传的 MIME 类型，Seedream 不再收到 `application/octet-stream` 的 data URL。
+- 删除调用未定义函数的 `chat_completions` 死分支；历史写入改为单次原子替换。
+- 数量输入框接受非法文本时按 1 处理，不再抛 `TclError` 中断生成。
 - 上游返回 `data: null` 或空图片项时不再产生 500 或 0 字节图片。
 - 历史记录写入增加进程内锁与原子替换，降低并发覆盖风险。
 - 结果与历史记录改为显示生成图片的真实像素尺寸。

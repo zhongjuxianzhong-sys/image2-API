@@ -11,9 +11,9 @@ from __future__ import annotations
 
 import base64
 import binascii
-import copy
 import io
 import json
+import mimetypes
 import os
 import sys
 import threading
@@ -87,6 +87,8 @@ GPT_QUALITY_ALIASES = {
     "2K": "hd",
     "4K": "4k",
 }
+# GPT Image 2 / 2.5 的质量选项：auto 表示按分辨率档自动映射为 standard / hd / 4k。
+GPT_IMAGE2_QUALITIES = ["auto", "standard", "hd", "4k", "high", "ultra"]
 # 示例中转站使用的标准像素表。auto/custom 另行处理。
 GPT_TIER_SIZES = {
     "1K": {
@@ -511,12 +513,14 @@ def model_identity(model_id: str) -> dict[str, Any]:
     order = 1000
     capabilities: dict[str, Any]
 
-    if normalized.startswith("gpt-image-2.5-"):
+    # 注意：_normalized_model_id 会把 "." 归一化成 "-"，
+    # 因此 "gpt-image-2.5" 到这里是 "gpt-image-2-5"，匹配必须用归一化后的写法。
+    if normalized.startswith("gpt-image-2-5"):
         family = "gpt-image-2.5"
         label = "GPT Image 2.5"
         capabilities = _ratio_capabilities(
             GPT_K_LEVELS,
-            ["standard", "hd", "4k", "high", "ultra"],
+            GPT_IMAGE2_QUALITIES,
             size_profile="gpt",
         )
     elif normalized.startswith("gpt-image-2"):
@@ -524,10 +528,10 @@ def model_identity(model_id: str) -> dict[str, Any]:
         label = "GPT Image 2"
         capabilities = _ratio_capabilities(
             GPT_K_LEVELS,
-            ["standard", "hd", "4k", "high", "ultra"],
+            GPT_IMAGE2_QUALITIES,
             size_profile="gpt",
         )
-    elif normalized.startswith("gpt-image-1.5"):
+    elif normalized.startswith("gpt-image-1-5"):
         family = "gpt-image-1.5"
         label = "GPT Image 1.5"
         capabilities = _ratio_capabilities(
@@ -590,7 +594,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 max_references=14,
                 extra=seedream_extra,
             )
-        elif "4-5" in normalized or "4.5" in normalized:
+        elif "4-5" in normalized:
             label = "Doubao-Seedream 4.5"
             order = 72
             capabilities = _ratio_capabilities(
@@ -602,7 +606,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 max_references=14,
                 extra=seedream_extra,
             )
-        elif "4-0" in normalized or "4.0" in normalized:
+        elif "4-0" in normalized:
             label = "Doubao-Seedream 4.0"
             order = 73
             capabilities = _ratio_capabilities(
@@ -614,7 +618,7 @@ def model_identity(model_id: str) -> dict[str, Any]:
                 max_references=14,
                 extra=seedream_extra,
             )
-        elif "3-0-t2i" in normalized or "3.0-t2i" in normalized:
+        elif "3-0-t2i" in normalized:
             label = "Doubao-Seedream 3.0 t2i"
             order = 74
             capabilities = _ratio_capabilities(
@@ -798,10 +802,7 @@ def _save_history(records: list[dict[str, Any]]) -> None:
 def _append_history(records: list[dict[str, Any]]) -> None:
     with HISTORY_LOCK:
         current = _load_history()
-        _save_history(records + current)
-        # _save_history writes the full list; trim while still under the lock.
-        if len(records) + len(current) > HISTORY_LIMIT:
-            _save_history((records + current)[:HISTORY_LIMIT])
+        _save_history((records + current)[:HISTORY_LIMIT])
 
 
 @app.get("/api/history")
@@ -918,10 +919,26 @@ def _files_to_data_urls(files: list[Any]) -> list[str]:
         raw = item.read()
         if not raw:
             continue
-        content_type = item.mimetype or "image/png"
         encoded = base64.b64encode(raw).decode("ascii")
-        result.append(f"data:{content_type};base64,{encoded}")
+        result.append(f"data:{_data_url_mime(raw, item.mimetype)};base64,{encoded}")
     return result
+
+
+def _data_url_mime(raw: bytes, content_type: str | None) -> str:
+    """data URL 的 MIME：优先用上传类型，缺失或过于笼统时按图片内容推断。"""
+    ctype = (content_type or "").strip().lower()
+    if ctype.startswith("image/"):
+        return ctype
+    return _IMAGE_MIME_BY_EXTENSION[_image_extension(raw)]
+
+
+def _upload_content_type(filename: str, content_type: str | None) -> str:
+    """转发参考图给上游时的 MIME：优先用上传类型，否则按扩展名推断。"""
+    ctype = (content_type or "").strip().lower()
+    if ctype.startswith("image/"):
+        return ctype
+    guessed, _ = mimetypes.guess_type(filename)
+    return guessed or "application/octet-stream"
 
 
 def _allowed_sizes(capabilities: dict[str, Any]) -> set[str]:
@@ -1170,7 +1187,7 @@ def generate():
             files_args = []
             for idx, item in enumerate(files):
                 filename = item.filename or f"reference-{idx + 1}.png"
-                ctype = item.mimetype or "image/png"
+                ctype = _upload_content_type(filename, item.mimetype)
                 files_args.append(("image", (filename, item.stream, ctype)))
             data = {
                 "model": model,
@@ -1222,12 +1239,9 @@ def generate():
     except ValueError:
         return jsonify({"ok": False, "error": "中转站返回了非 JSON 响应。"}), 502
 
-    if edit_transport == "chat_completions" and has_reference:
-        images = _extract_chat_images(data)
-    else:
-        images = data.get("data") if isinstance(data, dict) else None
-        if images is None:
-            images = []
+    images = data.get("data") if isinstance(data, dict) else None
+    if images is None:
+        images = []
     if not isinstance(images, list):
         return jsonify({"ok": False, "error": "中转站图片列表格式不正确。"}), 502
     if not images:
@@ -1398,6 +1412,14 @@ def _decode_base64_image(value: str) -> bytes:
     if not raw:
         raise ValueError("图片 base64 为空")
     return base64.b64decode(raw, validate=True)
+
+
+_IMAGE_MIME_BY_EXTENSION = {
+    ".png": "image/png",
+    ".jpg": "image/jpeg",
+    ".webp": "image/webp",
+    ".gif": "image/gif",
+}
 
 
 def _image_extension(raw: bytes, content_type: str = "") -> str:

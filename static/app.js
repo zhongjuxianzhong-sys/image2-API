@@ -295,11 +295,6 @@ function setStatus(kind, text) {
   els.statusText.textContent = text;
 }
 
-function sanitizeSVG(html) {
-  // 只为可控图标，不做外部 HTML 注入。
-  return html;
-}
-
 const ICON_DOWNLOAD = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M12 3v12M7 11l5 5 5-5M5 21h14"></path></svg>`;
 const ICON_ZOOM = `<svg viewBox="0 0 24 24" width="17" height="17" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="7"></circle><path d="M21 21l-4.3-4.3M11 8v6M8 11h6"></path></svg>`;
 
