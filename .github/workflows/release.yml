@@ -11,7 +11,7 @@ permissions:
 
 jobs:
   build:
-    name: Build Image2Studio.exe
+    name: Build GptImageStudio.exe
     runs-on: windows-latest
 
     steps:
@@ -32,10 +32,10 @@ jobs:
       - name: Verify build output
         shell: pwsh
         run: |
-          $exe = Resolve-Path "dist\Image2Studio.exe"
+          $exe = Resolve-Path "dist\GptImageStudio.exe"
           $guide = Resolve-Path "dist\使用说明.txt"
           if (-not (Test-Path -LiteralPath $exe)) {
-            throw "Missing dist\Image2Studio.exe"
+            throw "Missing dist\GptImageStudio.exe"
           }
           if (-not (Test-Path -LiteralPath $guide)) {
             throw "Missing dist\使用说明.txt"
@@ -44,9 +44,9 @@ jobs:
       - name: Upload Windows artifact
         uses: actions/upload-artifact@v7
         with:
-          name: Image2Studio-windows
+          name: GptImageStudio-windows
           path: |
-            dist/Image2Studio.exe
+            dist/GptImageStudio.exe
             dist/使用说明.txt
           if-no-files-found: error
 
@@ -55,6 +55,6 @@ jobs:
         uses: softprops/action-gh-release@v3
         with:
           files: |
-            dist/Image2Studio.exe
+            dist/GptImageStudio.exe
             dist/使用说明.txt
           generate_release_notes: true

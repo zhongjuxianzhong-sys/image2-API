@@ -1,4 +1,4 @@
-"""Image2 生图工坊原生 Windows 客户端。
+"""GPT 生图工坊原生 Windows 客户端。
 
 Flask 后端在同一进程的后台线程中运行，Tkinter 提供桌面界面。
 客户端不打开浏览器，关闭窗口时会同时停止内部服务。
@@ -12,6 +12,7 @@ import os
 import queue
 import secrets
 import threading
+import time
 import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -25,16 +26,24 @@ import app as backend
 
 
 CREDENTIALS_FILENAME = "client-credentials.dat"
-DPAPI_DESCRIPTION = "Image2 Studio credentials"
+DPAPI_DESCRIPTION = "GPT Image Studio credentials"
+APP_TITLE = "GPT 生图工坊"
+POLL_INTERVAL_MS = 1000
+REQUEST_TIMEOUT = 360
 
 
 class CredentialError(RuntimeError):
     pass
 
 
-def preferred_k_level(k_levels: list[str]) -> str:
-    if "2K" in k_levels:
-        return "2K"
+class TaskCancelled(RuntimeError):
+    """用户主动取消等待。"""
+
+
+def default_k_level(k_levels: list[str]) -> str:
+    """默认 1K：GPT IMAGE 2 在 1K 档单价最低、耗时最短。"""
+    if "1K" in k_levels:
+        return "1K"
     return k_levels[0] if k_levels else ""
 
 
@@ -148,12 +157,18 @@ def load_encrypted_credentials(path: Path) -> dict[str, str] | None:
     return {
         "base_url": str(payload.get("base_url") or ""),
         "api_key": str(payload.get("api_key") or ""),
+        "model": str(payload.get("model") or ""),
     }
 
 
-def save_encrypted_credentials(path: Path, base_url: str, api_key: str) -> None:
+def save_encrypted_credentials(
+    path: Path,
+    base_url: str,
+    api_key: str,
+    model: str = "",
+) -> None:
     payload = json.dumps(
-        {"base_url": base_url, "api_key": api_key},
+        {"base_url": base_url, "api_key": api_key, "model": model},
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -182,8 +197,7 @@ class BackendThread(threading.Thread):
     def stop(self) -> None:
         self.server.shutdown()
 
-
-class Image2Client:
+class GptImageClient:
     def __init__(self, root: tk.Tk, server: BackendThread) -> None:
         self.root = root
         self.server = server
@@ -197,8 +211,11 @@ class Image2Client:
         self.tasks: queue.Queue[tuple[str, Any]] = queue.Queue()
         self.closing = False
         self.credentials_path = backend.APP_DIR / CREDENTIALS_FILENAME
+        self.current_task_id: str | None = None
+        self.task_started_at = 0.0
+        self.waited_seconds = 0.0
 
-        self.root.title("Image2 生图工坊")
+        self.root.title(APP_TITLE)
         self.root.geometry("1080x780")
         self.root.minsize(900, 650)
         self.root.protocol("WM_DELETE_WINDOW", self.close)
@@ -206,6 +223,9 @@ class Image2Client:
         self._load_settings()
         self.root.after(100, self._drain_tasks)
 
+    # ------------------------------------------------------------------
+    # 界面
+    # ------------------------------------------------------------------
     def _build_ui(self) -> None:
         self.root.columnconfigure(0, weight=1)
         self.root.rowconfigure(1, weight=1)
@@ -213,15 +233,21 @@ class Image2Client:
         header = ttk.Frame(self.root, padding=(18, 14, 18, 8))
         header.grid(row=0, column=0, sticky="ew")
         header.columnconfigure(1, weight=1)
-        ttk.Label(header, text="Image2 生图工坊", font=("Segoe UI", 18, "bold")).grid(
+        ttk.Label(header, text=APP_TITLE, font=("Segoe UI", 18, "bold")).grid(
             row=0, column=0, sticky="w"
         )
         self.status_var = tk.StringVar(value="请填写 API Key 与 Base URL")
         ttk.Label(header, textvariable=self.status_var, foreground="#667085").grid(
             row=0, column=1, padx=(20, 0), sticky="w"
         )
-        self.generate_button = ttk.Button(header, text="开始生成", command=self.generate, state="disabled")
+        self.generate_button = ttk.Button(
+            header, text="开始生成", command=self.generate, state="disabled"
+        )
         self.generate_button.grid(row=0, column=2, padx=(14, 0), ipadx=12, ipady=3)
+        self.cancel_button = ttk.Button(
+            header, text="取消等待", command=self.cancel_generation, state="disabled"
+        )
+        self.cancel_button.grid(row=0, column=3, padx=(8, 0), ipadx=8, ipady=3)
 
         body = ttk.Frame(self.root, padding=(18, 0, 18, 18))
         body.grid(row=1, column=0, sticky="nsew")
@@ -238,7 +264,9 @@ class Image2Client:
         config.columnconfigure(0, weight=1)
         ttk.Label(config, text="提供商地址（Base URL）").grid(row=0, column=0, sticky="w")
         self.base_url_var = tk.StringVar()
-        ttk.Entry(config, textvariable=self.base_url_var).grid(row=1, column=0, sticky="ew", pady=(3, 8))
+        ttk.Entry(config, textvariable=self.base_url_var).grid(
+            row=1, column=0, sticky="ew", pady=(3, 8)
+        )
         ttk.Label(config, text="API Key").grid(row=2, column=0, sticky="w")
         key_row = ttk.Frame(config)
         key_row.grid(row=3, column=0, sticky="ew", pady=(3, 8))
@@ -247,86 +275,109 @@ class Image2Client:
         self.key_entry = ttk.Entry(key_row, textvariable=self.api_key_var, show="*")
         self.key_entry.grid(row=0, column=0, sticky="ew")
         self.show_key_var = tk.BooleanVar(value=False)
-        ttk.Checkbutton(key_row, text="显示", variable=self.show_key_var, command=self._toggle_key).grid(
-            row=0, column=1, padx=(7, 0)
-        )
+        ttk.Checkbutton(
+            key_row, text="显示", variable=self.show_key_var, command=self._toggle_key
+        ).grid(row=0, column=1, padx=(7, 0))
         config_buttons = ttk.Frame(config)
         config_buttons.grid(row=4, column=0, sticky="ew")
-        ttk.Button(config_buttons, text="刷新模型", command=self.refresh_models).pack(side="left")
+        ttk.Button(
+            config_buttons, text="刷新模型", command=self.refresh_models
+        ).pack(side="left")
+        ttk.Label(
+            config_buttons,
+            text="只列出上游的 gpt-image-* 模型",
+            foreground="#667085",
+        ).pack(side="left", padx=(8, 0))
         self.remember_var = tk.BooleanVar(value=False)
         ttk.Checkbutton(
             config,
-            text="记住 Base URL 和 API Key",
+            text="记住 Base URL、API Key 与模型",
             variable=self.remember_var,
             command=self._toggle_remember,
         ).grid(row=5, column=0, sticky="w", pady=(8, 0))
         self.remember_hint_var = tk.StringVar(value="未启用：关闭程序后不会保存凭据。")
-        ttk.Label(config, textvariable=self.remember_hint_var, foreground="#667085", wraplength=350).grid(
-            row=6, column=0, sticky="w", pady=(3, 0)
-        )
+        ttk.Label(
+            config,
+            textvariable=self.remember_hint_var,
+            foreground="#667085",
+            wraplength=350,
+        ).grid(row=6, column=0, sticky="w", pady=(3, 0))
 
         prompt_frame = ttk.LabelFrame(controls, text="提示词", padding=10)
         prompt_frame.grid(row=1, column=0, sticky="ew", pady=(0, 10))
         prompt_frame.columnconfigure(0, weight=1)
-        prompt_frame.rowconfigure(0, weight=1)
         self.prompt = tk.Text(prompt_frame, height=7, wrap="word", undo=True)
         self.prompt.grid(row=0, column=0, sticky="ew")
-        ttk.Button(prompt_frame, text="清空", command=lambda: self.prompt.delete("1.0", "end")).grid(
-            row=1, column=0, sticky="e", pady=(7, 0)
-        )
+        ttk.Button(
+            prompt_frame, text="清空", command=lambda: self.prompt.delete("1.0", "end")
+        ).grid(row=1, column=0, sticky="e", pady=(7, 0))
 
         model_frame = ttk.LabelFrame(controls, text="模型与参数", padding=10)
         model_frame.grid(row=2, column=0, sticky="ew", pady=(0, 10))
         model_frame.columnconfigure(1, weight=1)
         ttk.Label(model_frame, text="模型").grid(row=0, column=0, sticky="w", pady=3)
         self.model_var = tk.StringVar()
-        self.model_combo = ttk.Combobox(model_frame, textvariable=self.model_var, state="disabled")
+        self.model_combo = ttk.Combobox(
+            model_frame, textvariable=self.model_var, state="disabled"
+        )
         self.model_combo.grid(row=0, column=1, sticky="ew", pady=3)
         self.model_combo.bind("<<ComboboxSelected>>", lambda _event: self._apply_model())
 
         ttk.Label(model_frame, text="画幅").grid(row=1, column=0, sticky="w", pady=3)
-        self.ratio_var = tk.StringVar(value="auto")
-        self.ratio_combo = ttk.Combobox(model_frame, textvariable=self.ratio_var, state="disabled", values=["auto"])
+        self.ratio_var = tk.StringVar(value=backend.GPT_RATIOS[0])
+        self.ratio_combo = ttk.Combobox(
+            model_frame,
+            textvariable=self.ratio_var,
+            state="readonly",
+            values=backend.GPT_RATIOS,
+        )
         self.ratio_combo.grid(row=1, column=1, sticky="ew", pady=3)
-        self.ratio_combo.bind("<<ComboboxSelected>>", lambda _event: self._sync_ratio())
 
-        self.custom_label = ttk.Label(model_frame, text="自定义比例")
-        self.custom_ratio_var = tk.StringVar()
-        self.custom_ratio_entry = ttk.Entry(model_frame, textvariable=self.custom_ratio_var)
+        ttk.Label(model_frame, text="分辨率").grid(row=2, column=0, sticky="w", pady=3)
+        self.k_var = tk.StringVar(value=default_k_level(backend.GPT_K_LEVELS))
+        self.k_combo = ttk.Combobox(
+            model_frame,
+            textvariable=self.k_var,
+            state="readonly",
+            values=backend.GPT_K_LEVELS,
+        )
+        self.k_combo.grid(row=2, column=1, sticky="ew", pady=3)
 
-        ttk.Label(model_frame, text="分辨率").grid(row=3, column=0, sticky="w", pady=3)
-        self.k_var = tk.StringVar(value="1K")
-        self.k_combo = ttk.Combobox(model_frame, textvariable=self.k_var, state="disabled", values=["1K"])
-        self.k_combo.grid(row=3, column=1, sticky="ew", pady=3)
-
-        self.size_label = ttk.Label(model_frame, text="尺寸")
-        self.size_var = tk.StringVar()
-        self.size_combo = ttk.Combobox(model_frame, textvariable=self.size_var, state="disabled")
-        self.quality_label = ttk.Label(model_frame, text="质量")
-        self.quality_var = tk.StringVar()
-        self.quality_combo = ttk.Combobox(model_frame, textvariable=self.quality_var, state="disabled")
-        self._grid_optional_controls()
-
-        ttk.Label(model_frame, text="数量").grid(row=6, column=0, sticky="w", pady=3)
+        ttk.Label(model_frame, text="数量").grid(row=3, column=0, sticky="w", pady=3)
         self.count_var = tk.IntVar(value=1)
         self.count_spinbox = ttk.Spinbox(
-            model_frame,
-            from_=1,
-            to=4,
-            textvariable=self.count_var,
-            width=8,
+            model_frame, from_=1, to=backend.GPT_MAX_N, textvariable=self.count_var, width=8
         )
-        self.count_spinbox.grid(row=6, column=1, sticky="w", pady=3)
+        self.count_spinbox.grid(row=3, column=1, sticky="w", pady=3)
 
-        refs = ttk.LabelFrame(controls, text="参考图（可选）", padding=10)
+        self.param_hint_var = tk.StringVar(value="")
+        ttk.Label(
+            model_frame,
+            textvariable=self.param_hint_var,
+            foreground="#667085",
+            wraplength=350,
+        ).grid(row=4, column=0, columnspan=2, sticky="w", pady=(6, 0))
+
+        refs = ttk.LabelFrame(controls, text="参考图（可选，最多 4 张）", padding=10)
         refs.grid(row=3, column=0, sticky="ew", pady=(0, 10))
         refs.columnconfigure(0, weight=1)
         self.reference_var = tk.StringVar(value="未选择参考图")
-        ttk.Label(refs, textvariable=self.reference_var, foreground="#667085").grid(row=0, column=0, sticky="w")
+        ttk.Label(
+            refs, textvariable=self.reference_var, foreground="#667085", wraplength=350
+        ).grid(row=0, column=0, sticky="w")
         ref_buttons = ttk.Frame(refs)
         ref_buttons.grid(row=1, column=0, sticky="w", pady=(7, 0))
-        ttk.Button(ref_buttons, text="选择图片", command=self.choose_references).pack(side="left")
-        ttk.Button(ref_buttons, text="清除", command=self.clear_references).pack(side="left", padx=(7, 0))
+        ttk.Button(ref_buttons, text="选择图片", command=self.choose_references).pack(
+            side="left"
+        )
+        ttk.Button(ref_buttons, text="清除", command=self.clear_references).pack(
+            side="left", padx=(7, 0)
+        )
+        ttk.Label(
+            refs,
+            text="有参考图时按图生图调用（数量固定为 1 张）。",
+            foreground="#667085",
+        ).grid(row=2, column=0, sticky="w", pady=(6, 0))
 
         result = ttk.LabelFrame(body, text="生成结果", padding=10)
         result.grid(row=0, column=1, sticky="nsew")
@@ -335,26 +386,38 @@ class Image2Client:
         self.result_label = ttk.Label(result, text="生成的图片将在这里显示", anchor="center")
         self.result_label.grid(row=0, column=0, sticky="nsew")
         self.result_name_var = tk.StringVar(value="")
-        ttk.Label(result, textvariable=self.result_name_var, foreground="#667085").grid(row=1, column=0, pady=(8, 0))
+        ttk.Label(result, textvariable=self.result_name_var, foreground="#667085").grid(
+            row=1, column=0, pady=(8, 0)
+        )
+        self.progress = ttk.Progressbar(result, mode="determinate", maximum=100)
+        self.progress.grid(row=2, column=0, sticky="ew", pady=(8, 0))
+        self.progress.grid_remove()
+        self.progress_var = tk.StringVar(value="")
+        ttk.Label(result, textvariable=self.progress_var, foreground="#667085").grid(
+            row=3, column=0, pady=(4, 0)
+        )
         result_buttons = ttk.Frame(result)
-        result_buttons.grid(row=2, column=0, pady=(10, 0))
-        self.previous_button = ttk.Button(result_buttons, text="上一张", command=lambda: self._show_result(-1), state="disabled")
+        result_buttons.grid(row=4, column=0, pady=(10, 0))
+        self.previous_button = ttk.Button(
+            result_buttons, text="上一张", command=lambda: self._show_result(-1), state="disabled"
+        )
         self.previous_button.pack(side="left", padx=3)
-        self.next_button = ttk.Button(result_buttons, text="下一张", command=lambda: self._show_result(1), state="disabled")
+        self.next_button = ttk.Button(
+            result_buttons, text="下一张", command=lambda: self._show_result(1), state="disabled"
+        )
         self.next_button.pack(side="left", padx=3)
-        ttk.Button(result_buttons, text="打开输出目录", command=self.open_output_dir).pack(side="left", padx=3)
-
-        self.history_var = tk.StringVar(value="")
-        ttk.Label(result, textvariable=self.history_var, foreground="#667085", wraplength=560).grid(
-            row=3, column=0, pady=(16, 0)
+        ttk.Button(result_buttons, text="打开输出目录", command=self.open_output_dir).pack(
+            side="left", padx=3
         )
 
-    def _grid_optional_controls(self) -> None:
-        self.size_label.grid(row=2, column=0, sticky="w", pady=3)
-        self.size_combo.grid(row=2, column=1, sticky="ew", pady=3)
-        self.quality_label.grid(row=4, column=0, sticky="w", pady=3)
-        self.quality_combo.grid(row=4, column=1, sticky="ew", pady=3)
+        self.history_var = tk.StringVar(value="")
+        ttk.Label(
+            result, textvariable=self.history_var, foreground="#667085", wraplength=560
+        ).grid(row=5, column=0, pady=(16, 0))
 
+    # ------------------------------------------------------------------
+    # 凭据与模型
+    # ------------------------------------------------------------------
     def _toggle_key(self) -> None:
         self.key_entry.configure(show="" if self.show_key_var.get() else "*")
 
@@ -386,12 +449,13 @@ class Image2Client:
     def _save_settings(self) -> None:
         if not self.remember_var.get():
             return
-        base_url = self.base_url_var.get().strip()
-        api_key = self.api_key_var.get().strip()
-        if not base_url and not api_key:
-            return
         try:
-            save_encrypted_credentials(self.credentials_path, base_url, api_key)
+            save_encrypted_credentials(
+                self.credentials_path,
+                self.base_url_var.get().strip(),
+                self.api_key_var.get().strip(),
+                self.model_var.get().strip(),
+            )
         except CredentialError as exc:
             self.remember_hint_var.set(str(exc))
 
@@ -399,7 +463,7 @@ class Image2Client:
         try:
             self.credentials_path.unlink()
         except FileNotFoundError:
-            pass
+            return
         except OSError as exc:
             self.remember_hint_var.set(f"删除凭据文件失败：{exc}")
 
@@ -410,7 +474,9 @@ class Image2Client:
         def worker() -> None:
             try:
                 self.tasks.put((kind, (True, func())))
-            except Exception as exc:  # network errors are shown in the UI
+            except TaskCancelled as exc:
+                self.tasks.put((kind, (False, exc)))
+            except Exception as exc:  # noqa: BLE001 - 线程边界统一回传错误
                 self.tasks.put((kind, (False, str(exc))))
 
         threading.Thread(target=worker, daemon=True).start()
@@ -419,10 +485,13 @@ class Image2Client:
         try:
             while True:
                 kind, result = self.tasks.get_nowait()
+                ok, value = result
                 if kind == "models":
-                    self._finish_models(*result)
+                    self._finish_models(ok, value)
+                elif kind == "progress":
+                    self._update_progress(value)
                 elif kind == "generate":
-                    self._finish_generate(*result)
+                    self._finish_generate(ok, value)
         except queue.Empty:
             pass
         if not self.closing:
@@ -432,11 +501,9 @@ class Image2Client:
         base_url = self.base_url_var.get().strip()
         api_key = self.api_key_var.get().strip()
         if not base_url or not api_key:
-            self.status_var.set("请先填写 API Key 与 Base URL")
+            messagebox.showinfo("连接配置", "请先填写 Base URL 与 API Key。", parent=self.root)
             return
-        self._save_settings()
         self.status_var.set("正在获取模型列表…")
-        self.generate_button.configure(state="disabled")
         self._run_task("models", lambda: self._request_models(base_url, api_key))
 
     def _request_models(self, base_url: str, api_key: str) -> dict[str, Any]:
@@ -453,90 +520,86 @@ class Image2Client:
 
     def _finish_models(self, ok: bool, result: Any) -> None:
         if not ok:
-            self.status_var.set(result)
+            self.status_var.set(str(result))
             return
         self.model_items = result.get("items") or []
         ids = [item.get("id", "") for item in self.model_items]
         self.model_combo.configure(values=ids, state="readonly" if ids else "disabled")
         if ids:
-            preferred = result.get("default_model") if result.get("default_model") in ids else ids[0]
+            preferred = result.get("default_model")
+            if preferred not in ids:
+                preferred = ids[0]
             self.model_var.set(preferred)
             self._apply_model()
-            self.status_var.set(f"已发现 {len(ids)} 个生图模型")
+            self.status_var.set(f"已发现 {len(ids)} 个 GPT 生图模型")
+            self._save_settings()
         else:
             self.model_var.set("")
-            self.status_var.set("未发现可用的生图模型")
+            self.active_model = None
+            self.generate_button.configure(state="disabled")
+            self.status_var.set("未发现可用的 GPT 生图模型（上游需提供 gpt-image-*）")
 
     def _apply_model(self) -> None:
         model_id = self.model_var.get()
-        self.active_model = next((item for item in self.model_items if item.get("id") == model_id), None)
+        self.active_model = next(
+            (item for item in self.model_items if item.get("id") == model_id), None
+        )
         caps = (self.active_model or {}).get("capabilities") or {}
-        mode = caps.get("size_mode")
-        is_preset = mode == "preset"
-        self.ratio_combo.configure(values=caps.get("ratios") or ["auto"], state="disabled" if is_preset or mode == "none" else "readonly")
-        self.k_combo.configure(values=caps.get("k_levels") or ["1K"], state="disabled" if is_preset or mode == "none" else "readonly")
-        self.size_combo.configure(values=[item.get("value", "") for item in caps.get("preset_sizes") or []], state="readonly" if is_preset else "disabled")
-        self.quality_combo.configure(values=caps.get("qualities") or [], state="readonly" if caps.get("qualities") else "disabled")
-        if caps.get("ratios"):
-            self.ratio_var.set(caps["ratios"][0])
-        preferred_k = preferred_k_level(caps.get("k_levels") or [])
-        if preferred_k:
-            self.k_var.set(preferred_k)
-        if caps.get("preset_sizes"):
-            self.size_var.set(caps["preset_sizes"][0].get("value", ""))
-        if caps.get("qualities"):
-            self.quality_var.set(caps["qualities"][0])
-        max_n = int(caps.get("max_n") or 1)
-        self.count_var.set(min(self._read_count(), max_n))
-        self.count_spinbox.configure(to=max_n)
-        self._sync_ratio()
-        max_refs = int(caps.get("max_references") or 0)
-        if caps.get("edits") is False:
-            self.clear_references()
-            self.reference_var.set("当前模型不支持参考图")
-        elif max_refs == 1 and len(self.reference_paths) > 1:
-            self.reference_paths = self.reference_paths[:1]
-            self.reference_var.set(Path(self.reference_paths[0]).name)
-        else:
-            self.reference_var.set(self._reference_text())
-        self.generate_button.configure(state="normal" if model_id else "disabled")
 
-    def _sync_ratio(self) -> None:
-        enabled = self.ratio_var.get() == "custom" and self.ratio_combo.cget("state") != "disabled"
-        if enabled:
-            self.custom_label.grid(row=2, column=0, sticky="w", pady=3)
-            self.custom_ratio_entry.grid(row=2, column=1, sticky="ew", pady=3)
-            self.size_label.grid_configure(row=3)
-            self.size_combo.grid_configure(row=3)
-            self.quality_label.grid_configure(row=5)
-            self.quality_combo.grid_configure(row=5)
-        else:
-            self.custom_label.grid_remove()
-            self.custom_ratio_entry.grid_remove()
-            self.size_label.grid_configure(row=2)
-            self.size_combo.grid_configure(row=2)
-            self.quality_label.grid_configure(row=4)
-            self.quality_combo.grid_configure(row=4)
+        ratios = caps.get("ratios") or list(backend.GPT_RATIOS)
+        k_levels = caps.get("k_levels") or list(backend.GPT_K_LEVELS)
+        self.ratio_combo.configure(values=ratios)
+        self.k_combo.configure(values=k_levels)
+        if self.ratio_var.get() not in ratios:
+            self.ratio_var.set(ratios[0])
+        if self.k_var.get() not in k_levels:
+            self.k_var.set(default_k_level(k_levels))
+
+        max_n = int(caps.get("max_n") or backend.GPT_MAX_N)
+        self.count_spinbox.configure(to=max_n)
+        self.count_var.set(min(self._read_count(), max_n))
+        self._sync_reference_state()
+        self.generate_button.configure(state="normal" if model_id else "disabled")
+        self.progress_var.set("")
+
+    def _sync_reference_state(self) -> None:
+        """带参考图时数量锁 1（上游 chat 通道不支持 n）。"""
+        has_refs = bool(self.reference_paths)
+        self.count_spinbox.configure(state="disabled" if has_refs else "normal")
+        if has_refs:
+            self.count_var.set(1)
+
         caps = (self.active_model or {}).get("capabilities") or {}
-        k_enabled = caps.get("size_mode") == "ratio_and_k" and bool(caps.get("k_levels"))
-        self.k_combo.configure(state="disabled" if not k_enabled or self.ratio_var.get() == "auto" else "readonly")
+        transport = caps.get("edit_transport")
+        if transport == "edits":
+            self.param_hint_var.set(
+                "该模型上游只声明了 image-generation：参考图走 /images/edits 上传。"
+            )
+        else:
+            self.param_hint_var.set(
+                "参数按官方推荐：10 档画幅 × 1K/2K/4K；质量随档位映射 standard / hd / 4k。"
+            )
 
     def choose_references(self) -> None:
-        if not self.active_model or (self.active_model.get("capabilities") or {}).get("edits") is False:
-            messagebox.showinfo("参考图", "当前模型不支持参考图。", parent=self.root)
-            return
-        max_refs = int((self.active_model.get("capabilities") or {}).get("max_references") or 0)
         paths = filedialog.askopenfilenames(
             title="选择参考图",
             filetypes=[("图片", "*.png *.jpg *.jpeg *.webp *.gif"), ("所有文件", "*.*")],
             parent=self.root,
         )
-        if max_refs == 1:
-            paths = paths[:1]
-        elif max_refs:
-            paths = paths[:max_refs]
-        self.reference_paths = list(paths)
+        if not paths:
+            return
+        max_refs = int(
+            (self.active_model or {}).get("capabilities", {}).get("max_references")
+            or backend.GPT_MAX_REFERENCES
+        )
+        selected = list(paths)[:max_refs]
+        if len(paths) > max_refs:
+            messagebox.showinfo(
+                "参考图", f"GPT 生图最多支持 {max_refs} 张参考图，已保留前 {max_refs} 张。", parent=self.root
+            )
+        self.reference_paths = selected
         self.reference_var.set(self._reference_text())
+        self._sync_reference_state()
 
     def _reference_text(self) -> str:
         if not self.reference_paths:
@@ -546,6 +609,7 @@ class Image2Client:
     def clear_references(self) -> None:
         self.reference_paths = []
         self.reference_var.set("未选择参考图")
+        self._sync_reference_state()
 
     def _read_count(self) -> int:
         """Spinbox 允许手输，非法内容按 1 处理，避免 TclError 打断回调。"""
@@ -554,79 +618,193 @@ class Image2Client:
         except (tk.TclError, ValueError):
             return 1
 
+    # ------------------------------------------------------------------
+    # 生成与任务轮询
+    # ------------------------------------------------------------------
     def generate(self) -> None:
         prompt = self.prompt.get("1.0", "end").strip()
-        if not prompt:
-            messagebox.showwarning("提示词", "请先输入提示词。", parent=self.root)
-            return
         if not self.active_model:
-            messagebox.showwarning("模型", "请先刷新并选择模型。", parent=self.root)
+            messagebox.showinfo("提示词", "请先刷新模型并选择一个 GPT 生图模型。", parent=self.root)
             return
-        self.status_var.set("正在生成，请耐心等待…")
-        self.generate_button.configure(state="disabled")
-        args = {
-            "prompt": prompt,
+        if not prompt:
+            messagebox.showinfo("提示词", "请先填写提示词。", parent=self.root)
+            return
+        base_url = self.base_url_var.get().strip()
+        api_key = self.api_key_var.get().strip()
+        if not base_url or not api_key:
+            messagebox.showinfo("连接配置", "请先填写 Base URL 与 API Key。", parent=self.root)
+            return
+
+        caps = (self.active_model.get("capabilities") or {})
+        payload: dict[str, Any] = {
             "model": self.model_var.get(),
-            "base_url": self.base_url_var.get().strip(),
-            "api_key": self.api_key_var.get().strip(),
-            "references": list(self.reference_paths),
-            "caps": (self.active_model.get("capabilities") or {}),
+            "prompt": prompt,
+            "base_url": base_url,
+            "api_key": api_key,
             "ratio": self.ratio_var.get(),
-            "custom_ratio": self.custom_ratio_var.get().strip(),
             "k": self.k_var.get(),
-            "size": self.size_var.get(),
-            "quality": self.quality_var.get(),
             "n": self._read_count(),
+            "edit_transport": caps.get("edit_transport", "chat"),
         }
-        self._run_task("generate", lambda: self._request_generate(args))
+        references = list(self.reference_paths)
 
-    def _request_generate(self, args: dict[str, Any]) -> dict[str, Any]:
-        caps = args["caps"]
-        payload: dict[str, Any] = {"model": args["model"], "prompt": args["prompt"], "n": args["n"]}
-        if caps.get("size_mode") == "preset":
-            payload["size"] = args["size"]
-        elif caps.get("size_mode") != "none":
-            payload.update({"ratio": args["ratio"], "k": args["k"]})
-            if args["ratio"] == "custom":
-                payload["custom_ratio"] = args["custom_ratio"]
-        if caps.get("qualities"):
-            payload["quality"] = args["quality"]
+        self._set_busy(True)
+        self.status_var.set("正在提交生成请求…")
+        self.progress.configure(value=0)
+        self.progress_var.set("生成中 0%（已用 0 秒）")
+        self._run_task(
+            "generate", lambda: self._request_generate(payload, references)
+        )
 
+    def _request_generate(
+        self, payload: dict[str, Any], references: list[str]
+    ) -> dict[str, Any]:
         files = []
         handles = []
         try:
-            if args["references"]:
-                payload["base_url"] = args["base_url"]
-                payload["api_key"] = args["api_key"]
-                for path in args["references"]:
+            if references:
+                for path in references:
                     handle = open(path, "rb")
                     handles.append(handle)
                     files.append(("image", (Path(path).name, handle, reference_mime_type(path))))
-                response = requests.post(self._url("/api/generate"), data=payload, files=files, timeout=360)
+                response = requests.post(
+                    self._url("/api/tasks"),
+                    data=payload,
+                    files=files,
+                    timeout=REQUEST_TIMEOUT,
+                )
             else:
-                payload["base_url"] = args["base_url"]
-                payload["api_key"] = args["api_key"]
-                response = requests.post(self._url("/api/generate"), json=payload, timeout=360)
+                response = requests.post(
+                    self._url("/api/tasks"), json=payload, timeout=REQUEST_TIMEOUT
+                )
             data = response.json()
             if not response.ok or not data.get("ok"):
-                raise RuntimeError(data.get("error") or f"生成失败（HTTP {response.status_code}）")
-            return data
+                raise RuntimeError(
+                    data.get("error") or f"提交失败（HTTP {response.status_code}）"
+                )
         finally:
             for handle in handles:
                 handle.close()
 
+        task_id = data.get("task_id")
+        if not task_id:
+            raise RuntimeError("服务端没有返回任务 ID。")
+        return self._poll_task(task_id)
+
+    def _poll_task(self, task_id: str) -> dict[str, Any]:
+        """在后台线程按 1 秒节奏轮询本地任务状态。"""
+        self.current_task_id = task_id
+        self.task_started_at = time.time()
+        while True:
+            if self.closing:
+                raise RuntimeError("程序正在关闭。")
+            try:
+                response = requests.get(
+                    self._url(f"/api/tasks/{task_id}"), timeout=30
+                )
+                data = response.json()
+            except (requests.RequestException, ValueError):
+                time.sleep(POLL_INTERVAL_MS / 1000)
+                continue
+
+            if not response.ok or not data.get("ok"):
+                raise RuntimeError(
+                    data.get("error") or f"查询任务状态失败（HTTP {response.status_code}）"
+                )
+
+            state = data.get("state")
+            self.tasks.put(
+                (
+                    "progress",
+                    (
+                        True,
+                        {
+                            "state": state,
+                            "progress": data.get("progress") or 0,
+                            "elapsed": data.get("elapsed") or 0,
+                        },
+                    ),
+                )
+            )
+            if state == backend.TASK_DONE:
+                return data
+            if state == backend.TASK_CANCELLED:
+                raise TaskCancelled("已取消等待。")
+            if state == backend.TASK_FAILED:
+                raise RuntimeError(data.get("error") or "生成失败。")
+            time.sleep(POLL_INTERVAL_MS / 1000)
+
+    def cancel_generation(self) -> None:
+        task_id = self.current_task_id
+        if not task_id:
+            return
+        self.status_var.set("正在取消等待…")
+        self.cancel_button.configure(state="disabled")
+
+        def worker() -> None:
+            try:
+                requests.delete(self._url(f"/api/tasks/{task_id}"), timeout=15)
+            except requests.RequestException:
+                pass
+            self.current_task_id = None
+            self.tasks.put(("generate", (False, TaskCancelled("已取消等待。"))))
+
+        threading.Thread(target=worker, daemon=True).start()
+
+    def _update_progress(self, info: Any) -> None:
+        if not isinstance(info, dict) or self.current_task_id is None:
+            return
+        progress = int(info.get("progress") or 0)
+        elapsed = int(round(float(info.get("elapsed") or 0)))
+        self.progress.configure(value=progress)
+        state = info.get("state")
+        if state == backend.TASK_RUNNING:
+            self.status_var.set("正在生成…")
+        self.progress_var.set(f"生成中 {progress}%（已用 {elapsed} 秒）")
+
+    def _set_busy(self, busy: bool) -> None:
+        self.generate_button.configure(
+            state="disabled"
+            if busy
+            else ("normal" if self.active_model else "disabled")
+        )
+        self.cancel_button.configure(state="normal" if busy else "disabled")
+        self.model_combo.configure(
+            state="disabled" if busy or not self.model_items else "readonly"
+        )
+        self.ratio_combo.configure(state="disabled" if busy else "readonly")
+        self.k_combo.configure(state="disabled" if busy else "readonly")
+        if not busy:
+            self._sync_reference_state()
+        if busy:
+            self.progress.grid()
+        else:
+            self.progress.grid_remove()
+
     def _finish_generate(self, ok: bool, result: Any) -> None:
-        self.generate_button.configure(state="normal" if self.active_model else "disabled")
+        self.current_task_id = None
+        self._set_busy(False)
         if not ok:
+            if isinstance(result, TaskCancelled):
+                self.status_var.set("已取消等待")
+                self.progress_var.set("已取消等待。")
+                return
             self.status_var.set("生成失败")
             messagebox.showerror("生成失败", result, parent=self.root)
             return
-        self.result_paths = [self._output_path(item["filename"]) for item in result.get("images", [])]
+
+        self.result_paths = [
+            self._output_path(item["filename"]) for item in result.get("images", [])
+        ]
         self.result_index = 0
         self._show_result(0, absolute=True)
-        self.clear_references()
         self.status_var.set(f"生成完成，共 {len(self.result_paths)} 张")
-        self.history_var.set(f"模型：{result.get('meta', {}).get('model', '')}    尺寸：{result.get('meta', {}).get('size', '')}")
+        self.progress_var.set("")
+        meta = result.get("meta") or {}
+        self.history_var.set(
+            f"模型：{meta.get('model', '')}    尺寸：{meta.get('size', '')}    "
+            f"档位：{meta.get('k', '')}"
+        )
 
     def _output_path(self, filename: str) -> Path:
         return backend.OUTPUT_DIR / Path(filename).name
@@ -660,6 +838,12 @@ class Image2Client:
         if self.closing:
             return
         self.closing = True
+        task_id = self.current_task_id
+        if task_id:
+            try:
+                requests.delete(self._url(f"/api/tasks/{task_id}"), timeout=5)
+            except requests.RequestException:
+                pass
         self._save_settings()
         self.server.stop()
         self.root.destroy()
@@ -670,7 +854,7 @@ def main() -> None:
     server.start()
     root = tk.Tk()
     try:
-        Image2Client(root, server)
+        GptImageClient(root, server)
         root.mainloop()
     finally:
         server.stop()

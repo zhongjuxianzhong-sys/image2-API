@@ -13,9 +13,18 @@ class ReferenceMimeTests(unittest.TestCase):
 
     def test_unknown_extension_falls_back_to_octet_stream(self):
         self.assertEqual(
-            client.reference_mime_type("ref.image2-unknown"),
+            client.reference_mime_type("ref.gpt-image-unknown"),
             "application/octet-stream",
         )
+
+
+class BrandingTests(unittest.TestCase):
+    def test_window_title_is_gpt_branded(self):
+        self.assertEqual(client.APP_TITLE, "GPT 生图工坊")
+        self.assertNotIn("Image2", client.APP_TITLE)
+
+    def test_cancelled_error_type_exists(self):
+        self.assertTrue(issubclass(client.TaskCancelled, RuntimeError))
 
 
 if __name__ == "__main__":

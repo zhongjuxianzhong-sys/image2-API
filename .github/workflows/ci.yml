@@ -46,9 +46,8 @@ jobs:
       - name: Smoke test health endpoint
         shell: pwsh
         run: |
-          $stdout = Join-Path $env:RUNNER_TEMP "image2-health-out.log"
-          $stderr = Join-Path $env:RUNNER_TEMP "image2-health-err.log"
-          $process = Start-Process python -ArgumentList "app.py", "--port", "8877" -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout -RedirectStandardError $stderr
+          $stdout = Join-Path $env:RUNNER_TEMP "gptimage-health-out.log"
+          $process = Start-Process python -ArgumentList "app.py", "--port", "8877" -PassThru -WindowStyle Hidden -RedirectStandardOutput $stdout
           try {
             $deadline = (Get-Date).AddSeconds(20)
             do {
@@ -61,8 +60,19 @@ jobs:
             } until ($response.ok -or (Get-Date) -ge $deadline)
 
             if (-not $response.ok) {
-              Get-Content -LiteralPath $stdout, $stderr -ErrorAction SilentlyContinue
               throw "Health endpoint did not become ready within 20 seconds."
+            }
+
+            if ($response.model_mode -ne "gpt-image") {
+              throw "Unexpected model_mode"
+            }
+
+            if (($response.k_levels -join ",") -ne "1K,2K,4K") {
+              throw "Unexpected k_levels"
+            }
+
+            if ($response.ratios.Count -ne 10) {
+              throw "Unexpected ratio count"
             }
           } finally {
             if ($process -and -not $process.HasExited) {

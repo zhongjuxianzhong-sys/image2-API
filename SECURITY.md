@@ -11,6 +11,7 @@ to disk.
 
 ## Handling Sensitive Data
 
+- The internal service binds to `127.0.0.1` only and never reads `.env` or environment variables.
 - Never commit `.env` files, API keys, tokens, or provider URLs.
 - Keep API keys out of logs and history records.
 - Keep `client-credentials.dat` out of commits; it is DPAPI-encrypted but still sensitive.

@@ -1,6 +1,6 @@
-﻿# 一键打包为 Windows 单文件程序。
-# 产物：dist\Image2Studio.exe + dist\使用说明.txt
-# 提供商地址与 API Key 只由使用者在网页界面填写：exe 内不含任何 key 与中转站地址，
+# 一键打包为 Windows 单文件程序。
+# 产物：dist\GptImageStudio.exe + dist\使用说明.txt
+# 提供商地址与 API Key 只由使用者在客户端内填写：exe 内不含任何 key 与中转站地址，
 # 源码目录的 .env 既不会被打包，也不会被复制到 dist。
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $MyInvocation.MyCommand.Path
@@ -32,7 +32,7 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "开始打包..." -ForegroundColor Cyan
-& $python @pythonArgs -m PyInstaller --noconfirm --clean Image2Studio.spec
+& $python @pythonArgs -m PyInstaller --noconfirm --clean GptImageStudio.spec
 if ($LASTEXITCODE -ne 0) {
   throw "PyInstaller 打包失败，退出代码：$LASTEXITCODE"
 }
@@ -54,7 +54,14 @@ if (Test-Path -LiteralPath $staleSettings) {
   Write-Host "已删除 dist\client-settings.json（旧版明文配置）。" -ForegroundColor Yellow
 }
 
-Write-Host "打包完成：$Root\dist\Image2Studio.exe" -ForegroundColor Green
+# 旧版单文件 exe 更名为 GptImageStudio.exe，避免分发时两个 exe 混淆。
+$staleExe = Join-Path $Root "dist\Image2Studio.exe"
+if (Test-Path -LiteralPath $staleExe) {
+  Remove-Item -LiteralPath $staleExe -Force
+  Write-Host "已删除旧版 dist\Image2Studio.exe。" -ForegroundColor Yellow
+}
+
+Write-Host "打包完成：$Root\dist\GptImageStudio.exe" -ForegroundColor Green
 Get-ChildItem -LiteralPath (Join-Path $Root "dist") -Force |
   Where-Object { -not $_.PSIsContainer } |
   ForEach-Object { Write-Host ("  {0}  {1:N0} 字节" -f $_.Name, $_.Length) }

@@ -1,4 +1,4 @@
-"""Generate the Windows icon from the Image2 brand mark."""
+"""Generate the Windows icon from the GPT Image brand mark."""
 
 from pathlib import Path
 
@@ -6,7 +6,7 @@ from PIL import Image, ImageDraw
 
 
 ROOT = Path(__file__).resolve().parent
-ICON_PATH = ROOT / "assets" / "Image2Studio.ico"
+ICON_PATH = ROOT / "assets" / "GptImageStudio.ico"
 SIZES = (16, 24, 32, 48, 64, 128, 256)
 
 
