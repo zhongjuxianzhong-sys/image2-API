@@ -251,13 +251,43 @@ class GptImageClient:
 
         body = ttk.Frame(self.root, padding=(18, 0, 18, 18))
         body.grid(row=1, column=0, sticky="nsew")
-        body.columnconfigure(0, weight=0, minsize=395)
+        body.columnconfigure(0, weight=0, minsize=412)
         body.columnconfigure(1, weight=1)
         body.rowconfigure(0, weight=1)
 
-        controls = ttk.Frame(body)
-        controls.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        # 左侧控制区放进 Canvas：窗口较矮或系统缩放较大时可以上下滚动，不再被裁切。
+        self.controls_pane = ttk.Frame(body)
+        self.controls_pane.grid(row=0, column=0, sticky="nsew", padx=(0, 14))
+        self.controls_pane.columnconfigure(0, weight=1)
+        self.controls_pane.rowconfigure(0, weight=1)
+
+        canvas_bg = ttk.Style(self.root).lookup("TFrame", "background") or self.root.cget(
+            "background"
+        )
+        self.controls_canvas = tk.Canvas(
+            self.controls_pane,
+            highlightthickness=0,
+            borderwidth=0,
+            background=canvas_bg,
+        )
+        self.controls_canvas.grid(row=0, column=0, sticky="nsew")
+        self.controls_scrollbar = ttk.Scrollbar(
+            self.controls_pane, orient="vertical", command=self.controls_canvas.yview
+        )
+        self.controls_scrollbar.grid(row=0, column=1, sticky="ns")
+        self.controls_canvas.configure(yscrollcommand=self.controls_scrollbar.set)
+
+        controls = ttk.Frame(self.controls_canvas)
         controls.columnconfigure(0, weight=1)
+        self.controls_window = self.controls_canvas.create_window(
+            (0, 0), window=controls, anchor="nw"
+        )
+        controls.bind("<Configure>", self._refresh_controls_scrollregion)
+        self.controls_canvas.bind("<Configure>", self._resize_controls_window)
+        # 滚轮只在左侧控制区生效；提示词输入框保留自身滚动。
+        self.controls_canvas.bind_all("<MouseWheel>", self._on_controls_wheel)
+        self.controls_canvas.bind_all("<Button-4>", self._on_controls_wheel)
+        self.controls_canvas.bind_all("<Button-5>", self._on_controls_wheel)
 
         config = ttk.LabelFrame(controls, text="连接配置", padding=10)
         config.grid(row=0, column=0, sticky="ew", pady=(0, 10))
@@ -414,6 +444,56 @@ class GptImageClient:
         ttk.Label(
             result, textvariable=self.history_var, foreground="#667085", wraplength=560
         ).grid(row=5, column=0, pady=(16, 0))
+
+    # ------------------------------------------------------------------
+    # 左侧控制区滚动
+    # ------------------------------------------------------------------
+    def _resize_controls_window(self, event: Any) -> None:
+        """让滚动内容宽度跟随 Canvas，避免出现横向滚动。"""
+        self.controls_canvas.itemconfigure(self.controls_window, width=event.width)
+        self._refresh_controls_scrollregion()
+
+    def _refresh_controls_scrollregion(self, _event: Any = None) -> None:
+        """内容高度变化时刷新滚动范围；不需要滚动时隐藏滚动条。"""
+        bbox = self.controls_canvas.bbox("all")
+        if not bbox:
+            return
+        self.controls_canvas.configure(scrollregion=bbox)
+        viewport_height = self.controls_canvas.winfo_height()
+        if viewport_height <= 1:
+            return
+        if (bbox[3] - bbox[1]) > viewport_height:
+            if not self.controls_scrollbar.winfo_ismapped():
+                self.controls_scrollbar.grid()
+        elif self.controls_scrollbar.winfo_ismapped():
+            self.controls_scrollbar.grid_remove()
+            self.controls_canvas.yview_moveto(0)
+
+    def _on_controls_wheel(self, event: Any) -> str | None:
+        """鼠标位于左侧控制区时滚动它；提示词输入框交给输入框自己处理。"""
+        pointer = self.root.winfo_containing(
+            self.root.winfo_pointerx(), self.root.winfo_pointery()
+        )
+        if pointer is None or isinstance(pointer, tk.Text):
+            return None
+        if not self._is_inside_controls(pointer):
+            return None
+        step = getattr(event, "delta", 0)
+        if getattr(event, "num", None) == 4:
+            step = 1
+        elif getattr(event, "num", None) == 5:
+            step = -1
+        if not step:
+            return None
+        self.controls_canvas.yview_scroll(-1 if step > 0 else 1, "units")
+        return "break"
+
+    def _is_inside_controls(self, widget: Any) -> bool:
+        while widget is not None:
+            if widget is self.controls_pane:
+                return True
+            widget = getattr(widget, "master", None)
+        return False
 
     # ------------------------------------------------------------------
     # 凭据与模型

@@ -21,6 +21,7 @@ and this project does not use semantic versioning yet.
 
 - `POST /api/tasks`、`GET /api/tasks/<id>`、`DELETE /api/tasks/<id>` 异步任务接口，支持进度查询与「取消等待」。
 - 客户端进度条与“生成中 xx%（已用 xx 秒）”提示，生成期间可取消等待。
+- 左侧控制区（连接配置 / 提示词 / 模型与参数 / 参考图）加入上下滚动：窗口较矮或系统缩放较大时不再被裁切，滚动条只在内容超出时出现，滚轮在提示词输入框内仍用于文本滚动。
 - 上游 SSE（`text/event-stream`）流式响应解析，兼容 chat 通道按流返回图片 URL 的情况。
 - 任务表加锁与 TTL 清理：终态任务保留 30 分钟，进程退出时清空。
 
